@@ -27,6 +27,8 @@ static bool load (const char *file_name, struct intr_frame *if_);
 static void initd (void *f_name);
 static void __do_fork (void *);
 
+static bool setup_arguments (int argc, char *argv[], struct intr_frame *if_);
+
 /* General process initializer for initd and other process. */
 static void
 process_init (void) {
@@ -169,17 +171,15 @@ process_exec (void *f_name) {
 	bool success;
 
 	// 공백 기준으로 파싱
-	for (char *token = strtok_r (command_line, " ", &save_ptr);
-         token != NULL;
-         token = strtok_r (NULL, " ", &save_ptr)) {
+	for (char *token = strtok_r (command_line, " ", &save_ptr); token != NULL; token = strtok_r (NULL, " ", &save_ptr)) {
         if (argc == 128)
-            break; // 이때는 palloc free page 안 해도 되나?
+            break;
         argv[argc++] = token;
     }
 
 	// 단어 없으면 실패 알림
     if (argc == 0) {
-        palloc_free_page (command_line);
+    	palloc_free_page (command_line);
         return -1;
     }
 
@@ -194,11 +194,16 @@ process_exec (void *f_name) {
 	/* We first kill the current context */
 	process_cleanup ();
 
-	/* And then load the binary */
-	success = load (command_line, &_if);
+	/* 실행 파일은 첫 번째 토큰임 */
+	success = load (argv[0], &_if);
 
+	if (success)
+		success = setup_arguments(argc, argv, &_if);
+
+	// 인자를 스택에 복사한 후 원본 해제
+	palloc_free_page(command_line);
+	
 	/* If load failed, quit. */
-	palloc_free_page (command_line);
 	if (!success)
 		return -1;
 
@@ -207,6 +212,48 @@ process_exec (void *f_name) {
 	NOT_REACHED ();
 }
 
+static bool
+setup_arguments(int argc, char *argv[], struct intr_frame *if_) {
+	if (argc < 1 || argc > 128)
+		return false;
+		
+	uintptr_t rsp = (uintptr_t)if_->rsp; // 스택 시작 주소
+	char *arg_addresses[128]; // 유저 스택에 복사한 새 주소
+
+    /* 인자 문자열을 스택에 복사합니다. */
+    for (int i = argc - 1; i >= 0; i--) {
+        size_t len = strlen (argv[i]) + 1;
+        rsp -= len; // argv 주소에서 움직임
+        memcpy ((void *) rsp, argv[i], len);
+        arg_addresses[i] = (char *) rsp;
+    }
+
+    /* 포인터 배열을 8바이트 경계에 맞춥니다 */
+    rsp &= ~((uintptr_t) 7);
+
+    // 맨 끝에 NULL 넣어서 끝 표시
+    rsp -= sizeof (char *);
+    *(char **) rsp = NULL;
+
+    /* argv[i]의 주소를 스택에 넣습니다. */
+    for (int i = argc - 1; i >= 0; i--) {
+        rsp -= sizeof (char *);
+        *(char **) rsp = arg_addresses[i];
+    }
+
+    char **user_argv = (char **) rsp;
+
+    /* _start(argc, argv)의 인자를 레지스터로 전달합니다. */
+    if_->R.rdi = argc;
+    if_->R.rsi = (uintptr_t) user_argv;
+
+    /* 가짜 반환 주소를 두고 최종 스택 포인터를 설정합니다. */
+    rsp -= sizeof (void *);
+    *(void **) rsp = NULL;
+    if_->rsp = rsp;
+
+    return true;
+}
 
 /* Waits for thread TID to die and returns its exit status.  If
  * it was terminated by the kernel (i.e. killed due to an
@@ -222,6 +269,8 @@ process_wait (tid_t child_tid UNUSED) {
 	/* XXX: Hint) The pintos exit if process_wait (initd), we recommend you
 	 * XXX:       to add infinite loop here before
 	 * XXX:       implementing the process_wait. */
+	while(true) {};
+	
 	return -1;
 }
 

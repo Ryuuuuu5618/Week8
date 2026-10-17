@@ -162,8 +162,26 @@ error:
  * Returns -1 on fail. */
 int
 process_exec (void *f_name) {
-	char *file_name = f_name;
+	char *command_line = f_name;
+	char *argv[128]; // 걍 임의의 값
+	int argc = 0;
+	char *save_ptr;
 	bool success;
+
+	// 공백 기준으로 파싱
+	for (char *token = strtok_r (command_line, " ", &save_ptr);
+         token != NULL;
+         token = strtok_r (NULL, " ", &save_ptr)) {
+        if (argc == 128)
+            break; // 이때는 palloc free page 안 해도 되나?
+        argv[argc++] = token;
+    }
+
+	// 단어 없으면 실패 알림
+    if (argc == 0) {
+        palloc_free_page (command_line);
+        return -1;
+    }
 
 	/* We cannot use the intr_frame in the thread structure.
 	 * This is because when current thread rescheduled,
@@ -177,10 +195,10 @@ process_exec (void *f_name) {
 	process_cleanup ();
 
 	/* And then load the binary */
-	success = load (file_name, &_if);
+	success = load (command_line, &_if);
 
 	/* If load failed, quit. */
-	palloc_free_page (file_name);
+	palloc_free_page (command_line);
 	if (!success)
 		return -1;
 

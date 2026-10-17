@@ -22,6 +22,11 @@
 #include "vm/vm.h"
 #endif
 
+// 동기화 도구 추가
+#include "threads/synch.h"
+
+struct semaphore waiting_child_sema;
+
 static void process_cleanup (void);
 static bool load (const char *file_name, struct intr_frame *if_);
 static void initd (void *f_name);
@@ -49,6 +54,8 @@ process_create_initd (const char *file_name) {
 	if (fn_copy == NULL)
 		return TID_ERROR;
 	strlcpy (fn_copy, file_name, PGSIZE);
+
+	sema_init(&waiting_child_sema, 0);
 
 	/* Create a new thread to execute FILE_NAME. */
 	tid = thread_create (file_name, PRI_DEFAULT, initd, fn_copy);
@@ -206,7 +213,7 @@ process_wait (tid_t child_tid UNUSED) {
 	 * XXX:       implementing the process_wait. */
 
 	// 임시 코드
-	while(true) { };
+	sema_down(&waiting_child_sema);
 	
 	return -1;
 }
@@ -219,6 +226,10 @@ process_exit (void) {
 	 * TODO: Implement process termination message (see
 	 * TODO: project2/process_termination.html).
 	 * TODO: We recommend you to implement process resource cleanup here. */
+
+	if(curr->pml4 != NULL) {
+		sema_up(&waiting_child_sema);
+	}
 
 	process_cleanup ();
 }

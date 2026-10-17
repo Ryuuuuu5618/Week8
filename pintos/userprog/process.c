@@ -27,6 +27,8 @@ static bool load (const char *file_name, struct intr_frame *if_);
 static void initd (void *f_name);
 static void __do_fork (void *);
 
+static void argument_passing(struct intr_frame *_if, char **argv, int argc);
+
 /* General process initializer for initd and other process. */
 static void
 process_init (void) {
@@ -43,15 +45,17 @@ process_create_initd (const char *file_name) {
 	char *fn_copy;
 	tid_t tid;
 
+	char *tmp = strtok(tmp, " ");
+
 	/* Make a copy of FILE_NAME.
 	 * Otherwise there's a race between the caller and load(). */
 	fn_copy = palloc_get_page (0);
 	if (fn_copy == NULL)
 		return TID_ERROR;
-	strlcpy (fn_copy, file_name, PGSIZE);
+	strlcpy (fn_copy, tmp, PGSIZE);
 
 	/* Create a new thread to execute FILE_NAME. */
-	tid = thread_create (file_name, PRI_DEFAULT, initd, fn_copy);
+	tid = thread_create (tmp, PRI_DEFAULT, initd, fn_copy);
 	if (tid == TID_ERROR)
 		palloc_free_page (fn_copy);
 	return tid;
@@ -163,6 +167,23 @@ error:
 int
 process_exec (void *f_name) {
 	char *file_name = f_name;
+	
+	char *argv[64];
+	
+	char *saveptr;
+	char *token = strtok_r(f_name, " ", &saveptr);
+	
+	int argc = 0;
+
+	while (token != NULL && argc < 63)
+	{
+		argv[argc] = token;
+		token = strtok_r(NULL, " ", &saveptr);
+		argc++;
+	}
+	argv[argc] = NULL;
+
+	// 성공 -> 반환x || 실패 -> -1 반환
 	bool success;
 
 	/* We cannot use the intr_frame in the thread structure.
@@ -174,21 +195,67 @@ process_exec (void *f_name) {
 	_if.eflags = FLAG_IF | FLAG_MBS;
 
 	/* We first kill the current context */
-	process_cleanup ();
+	process_cleanup();
 
 	/* And then load the binary */
-	success = load (file_name, &_if);
+	success = load (argv[0], &_if);
+	if (!success)
+	{
+		palloc_free_page (file_name);
+		return -1;
+	}
+
+	argument_passing(&_if, argv, argc);
 
 	/* If load failed, quit. */
-	palloc_free_page (file_name);
-	if (!success)
-		return -1;
+	palloc_free_page(file_name);
 
 	/* Start switched process. */
 	do_iret (&_if);
 	NOT_REACHED ();
 }
 
+static void argument_passing(struct intr_frame *_if, char **argv, int argc)
+{
+	char *addr_list[argc];
+
+	for (int i = 0; i < argc; i++)
+	{
+		int str_length = strlen(argv[i]) + 1;
+		_if->rsp -= str_length;
+
+    	memcpy((void *)_if->rsp, argv[i], str_length);
+		addr_list[i] = (char *)_if->rsp;
+	}
+
+	// 8바이트 정렬
+	int now_stack_length = USER_STACK - _if->rsp;
+
+	int word_alignment = now_stack_length % 8;
+	if (word_alignment != 0)
+	{
+		_if->rsp -= word_alignment; 
+	}
+
+	_if->rsp -= 8;
+	*(char **)(_if->rsp) = argv[argc];
+
+	// 문자열 주소, 메모리 주소 낮은 곳 -> 높은 곳 순으로 쌓아야 함
+	for (int i = argc - 1; i >= 0; i--)
+	{
+		_if->rsp -= 8;
+		*(char **)(_if->rsp) = (char *)addr_list[i];
+	}
+
+	// 인자 수
+	_if->R.rdi = argc;
+	// 인자 주소 시작 위치
+	_if->R.rsi = _if->rsp;
+
+	// 가짜 주소 반환
+	_if->rsp -= 8;
+	*(char **)(_if->rsp) = 0;
+}
 
 /* Waits for thread TID to die and returns its exit status.  If
  * it was terminated by the kernel (i.e. killed due to an
@@ -204,6 +271,13 @@ process_wait (tid_t child_tid UNUSED) {
 	/* XXX: Hint) The pintos exit if process_wait (initd), we recommend you
 	 * XXX:       to add infinite loop here before
 	 * XXX:       implementing the process_wait. */
+
+	// 무한 루프 제거해야 함
+	while (true)
+	{
+
+	}
+
 	return -1;
 }
 

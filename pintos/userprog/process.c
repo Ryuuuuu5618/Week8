@@ -204,6 +204,10 @@ process_wait (tid_t child_tid UNUSED) {
 	/* XXX: Hint) The pintos exit if process_wait (initd), we recommend you
 	 * XXX:       to add infinite loop here before
 	 * XXX:       implementing the process_wait. */
+
+	// 임시 코드
+	while(true) { };
+	
 	return -1;
 }
 
@@ -309,6 +313,8 @@ struct ELF64_PHDR {
 /* Abbreviations */
 #define ELF ELF64_hdr
 #define Phdr ELF64_PHDR
+#define MAX_FILE_NAME 128
+#define MAX_ARG (MAX_FILE_NAME / 2)
 
 static bool setup_stack (struct intr_frame *if_);
 static bool validate_segment (const struct Phdr *, struct file *);
@@ -329,6 +335,32 @@ load (const char *file_name, struct intr_frame *if_) {
 	bool success = false;
 	int i;
 
+	// 인자로 받아온 명령줄 복사
+	int file_name_len = strlen(file_name) + 1;
+	if (file_name_len > MAX_FILE_NAME) {
+		return success;
+	}
+	char fn_copy[file_name_len];
+	memcpy(fn_copy, file_name, file_name_len);
+
+	// 명령어, 인자 파싱
+	int argc = 0;
+	char *argv[MAX_ARG + 1];
+	char *saveptr;
+	char *arg = strtok_r(fn_copy, " ", &saveptr);
+	
+	while(arg != NULL) {
+		if (argc > MAX_ARG - 1) {
+			return success;
+		}
+		argv[argc] = arg;
+		arg = strtok_r(NULL, " ", &saveptr);
+		argc++;
+	}
+
+	
+	argv[argc] = '\0';
+
 	/* Allocate and activate page directory. */
 	t->pml4 = pml4_create ();
 	if (t->pml4 == NULL)
@@ -336,7 +368,7 @@ load (const char *file_name, struct intr_frame *if_) {
 	process_activate (thread_current ());
 
 	/* Open executable file. */
-	file = filesys_open (file_name);
+	file = filesys_open (argv[0]);
 	if (file == NULL) {
 		printf ("load: %s: open failed\n", file_name);
 		goto done;
@@ -416,6 +448,35 @@ load (const char *file_name, struct intr_frame *if_) {
 
 	/* TODO: Your code goes here.
 	 * TODO: Implement argument passing (see project2/argument_passing.html). */
+
+
+	for (int i = argc - 1; i >= 0; i--) {
+		int arg_len = strlen(argv[i]) + 1;
+		if_->rsp -= (arg_len);
+		memcpy((char *)if_->rsp, argv[i], arg_len);
+		argv[i] = (char *)if_->rsp;
+	}
+
+	// 8배수 정렬(내림)
+	if_->rsp = (if_->rsp / 8) * 8;
+
+	// argv[argc]에 0 저장
+	if_->rsp -= sizeof(char *);
+	*(char **)if_->rsp = 0;
+
+	for (int i = argc - 1; i >= 0; i--) {
+		if_->rsp -= sizeof(char *);
+		*(char**)if_->rsp = argv[i];
+	}
+
+	if_->rsp -= sizeof(void *);
+	*(void **)if_->rsp = 0;
+
+	if_->R.rdi = argc;
+	if_->R.rsi = if_->rsp + sizeof(void *);
+
+	// 검사 코드
+	// hex_dump (if_->rsp, (void *) if_->rsp, USER_STACK - if_->rsp, true);	
 
 	success = true;
 

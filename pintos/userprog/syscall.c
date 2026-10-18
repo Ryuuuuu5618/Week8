@@ -10,6 +10,7 @@
 
 void syscall_entry (void);
 void syscall_handler (struct intr_frame *);
+static bool syscall_invalid_memory(struct intr_frame *);
 
 /* System call.
  *
@@ -41,6 +42,48 @@ syscall_init (void) {
 void
 syscall_handler (struct intr_frame *f UNUSED) {
 	// TODO: Your implementation goes here.
-	printf ("system call!\n");
+	if (!syscall_invalid_memory(f)) {
+		printf ("system call!\n");
+	}
 	thread_exit ();
+}
+
+static bool 
+syscall_invalid_memory(struct intr_frame *f) {
+	bool is_invalid = false;
+
+	uint64_t addr = 0;
+	uint64_t size = 0;
+
+	switch(f->R.rax) {
+		case SYS_CREATE:
+			size = f->R.rsi - 1;
+		case SYS_FORK:
+		case SYS_EXEC:
+		case SYS_REMOVE:
+		case SYS_OPEN:
+			addr = f->R.rdi;
+			break;
+		
+		case SYS_READ:
+		case SYS_WRITE:
+			addr = f->R.rsi;
+			size = f->R.rdx;
+			break;
+		default:
+			return is_invalid;
+	}
+
+	if (addr >= USER_STACK) {
+		is_invalid = true;
+	}
+	else {
+		if ((addr + (size - 1)) >= USER_STACK || 
+		!pml4_get_page(thread_current()->pml4, (void *) addr) || 
+		!pml4_get_page(thread_current()->pml4, (void *) (addr + (size - 1)))) {
+			is_invalid = true;
+		}
+	}
+	
+	return is_invalid;
 }

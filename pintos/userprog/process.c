@@ -287,7 +287,8 @@ setup_arguments(int argc, char *argv[], struct intr_frame *if_) {
 	*(void **) rsp = NULL;
 	if_->rsp = rsp;
 
-	hex_dump (if_->rsp, (void *) if_->rsp, USER_STACK - if_->rsp, true);
+	// 스택 확인용 테스트 코드
+	// hex_dump (if_->rsp, (void *) if_->rsp, USER_STACK - if_->rsp, true);
 
 	return true;
 }

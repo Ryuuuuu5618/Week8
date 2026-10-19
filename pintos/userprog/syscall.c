@@ -12,6 +12,8 @@
 #include "threads/flags.h"
 #include "intrinsic.h"
 
+struct lock file_lock;
+
 void syscall_entry (void);
 void syscall_handler (struct intr_frame *);
 
@@ -44,6 +46,8 @@ syscall_init (void) {
 	 * mode stack. Therefore, we masked the FLAG_FL. */
 	write_msr(MSR_SYSCALL_MASK,
 			FLAG_IF | FLAG_TF | FLAG_DF | FLAG_IOPL | FLAG_AC | FLAG_NT);
+
+	lock_init(&file_lock);
 }
 
 /* The main system call interface */
@@ -63,6 +67,34 @@ syscall_handler (struct intr_frame *f) {
 		case SYS_EXIT:
 			exit_with_status ((int) f->R.rdi);
 			break;
+
+		case SYS_FORK:
+			break;
+		
+		case SYS_EXEC:
+			break;
+
+		case SYS_WAIT:
+			break;
+
+		case SYS_CREATE:
+			lock_acquire(&file_lock);
+			f->R.rax = filesys_create((char *)f->R.rdi, f->R.rsi);
+			lock_release(&file_lock);
+			break;
+		
+		case SYS_REMOVE:
+			lock_acquire(&file_lock);
+			f->R.rax = filesys_remove((char *)f->R.rdi);
+			lock_release(&file_lock);
+			break;
+
+		case SYS_OPEN:
+			break;
+
+		case SYS_FILESIZE:
+			break;
+
 
 		case SYS_WRITE:
 			/* TODO: 파일 쓰기(fd >= 2)는 파일 시스템 콜 작업에서 구현 */

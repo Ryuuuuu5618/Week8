@@ -21,7 +21,7 @@
 #ifdef VM
 #include "vm/vm.h"
 #endif
-#include "threads/synch.h"
+#include "userprog/syscall.h"
 
 /* 한 명령어에서 받을 최대 인자 수 (argv 배열이 커널 스택에 잡히므로 너무 크게 두지 않음) */
 #define MAX_ARGS 64
@@ -221,7 +221,9 @@ process_exec (void *f_name) {
 	process_cleanup ();
 
 	/* 실행 파일은 첫 번째 토큰임 */
+	lock_acquire(&file_lock);
 	success = load (argv[0], &_if);
+	lock_release(&file_lock);
 
 	if (success)
 		success = setup_arguments(argc, argv, &_if);

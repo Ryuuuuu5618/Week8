@@ -324,6 +324,7 @@ process_exit (void) {
 
 	/* [임시] 유저 프로세스(pml4 보유)가 끝나면 process_wait 깨우기 */
 	if (curr->pml4 != NULL)
+		printf("%s: exit(%d)\n", curr->name, curr->process_status);
 		sema_up (&initd_exit_sema);
 
 	process_cleanup ();

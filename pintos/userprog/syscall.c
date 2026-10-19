@@ -42,10 +42,29 @@ syscall_init (void) {
 void
 syscall_handler (struct intr_frame *f UNUSED) {
 	// TODO: Your implementation goes here.
-	if (!syscall_invalid_memory(f)) {
-		printf ("system call!\n");
+	if (syscall_invalid_memory(f)) {
+		thread_exit();
 	}
-	thread_exit ();
+
+	switch (f->R.rax) {
+		case SYS_HALT:
+			power_off();
+			break;
+
+		case SYS_EXIT:
+			thread_current()->process_status = (int) f->R.rdi;
+			thread_exit();
+			break;
+
+		case SYS_WRITE:
+			if (f->R.rdi == 1) {
+				putbuf(f->R.rsi, f->R.rdx);
+			}
+			break;
+	
+		default:
+			break;
+	}
 }
 
 static bool 

@@ -85,7 +85,8 @@ kill (struct intr_frame *f) {
 			   expected.  Kill the user process.  */
 			printf ("%s: dying due to interrupt %#04llx (%s).\n",
 					thread_name (), f->vec_no, intr_name (f->vec_no));
-			intr_dump_frame (f);
+			// intr_dump_frame이 64비트로 출력되면서 32비트는 무시하지만 64비트는 무시를 안해서 테스트에서 오류 발생
+			// intr_dump_frame (f);
 			thread_exit ();
 
 		case SEL_KCSEG:

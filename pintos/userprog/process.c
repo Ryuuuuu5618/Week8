@@ -287,7 +287,8 @@ setup_arguments(int argc, char *argv[], struct intr_frame *if_) {
 	*(void **) rsp = NULL;
 	if_->rsp = rsp;
 
-	hex_dump (if_->rsp, (void *) if_->rsp, USER_STACK - if_->rsp, true);
+	// 스택 확인용 테스트 코드
+	// hex_dump (if_->rsp, (void *) if_->rsp, USER_STACK - if_->rsp, true);
 
 	return true;
 }
@@ -322,9 +323,10 @@ process_exit (void) {
 	 * TODO: We recommend you to implement process resource cleanup here. */
 
 	/* [임시] 유저 프로세스(pml4 보유)가 끝나면 process_wait 깨우기 */
-	if (curr->pml4 != NULL)
+	if (curr->pml4 != NULL) {
+		printf("%s: exit(%d)\n", curr->name, curr->process_status);
 		sema_up (&initd_exit_sema);
-
+	}
 	process_cleanup ();
 }
 

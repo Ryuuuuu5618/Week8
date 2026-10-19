@@ -1,16 +1,24 @@
 #include "userprog/syscall.h"
 #include <stdio.h>
+#include <stdint.h>
 #include <syscall-nr.h>
 #include "threads/interrupt.h"
 #include "threads/thread.h"
 #include "threads/loader.h"
+#include "threads/init.h"
+#include "threads/mmu.h"
+#include "threads/vaddr.h"
 #include "userprog/gdt.h"
 #include "threads/flags.h"
 #include "intrinsic.h"
 
 void syscall_entry (void);
 void syscall_handler (struct intr_frame *);
-static bool syscall_invalid_memory(struct intr_frame *);
+
+static bool syscall_invalid_memory (struct intr_frame *);
+static bool valid_user_buffer (const void *buffer, size_t size);
+static bool valid_user_string (const char *str);
+static void exit_with_status (int status);
 
 /* System call.
  *
@@ -40,69 +48,121 @@ syscall_init (void) {
 
 /* The main system call interface */
 void
-syscall_handler (struct intr_frame *f UNUSED) {
-	// TODO: Your implementation goes here.
-	if (syscall_invalid_memory(f)) {
-		thread_exit();
+syscall_handler (struct intr_frame *f) {
+	/* 사용자가 넘긴 포인터를 커널이 쓰기 전에 먼저 검사한다 (방법 1).
+	 * 잘못된 메모리면 접근하지 않고 프로세스를 exit(-1)로 끝낸다. */
+	if (syscall_invalid_memory (f)) {
+		exit_with_status (-1);
 	}
 
 	switch (f->R.rax) {
 		case SYS_HALT:
-			power_off();
+			power_off ();
 			break;
 
 		case SYS_EXIT:
-			thread_current()->process_status = (int) f->R.rdi;
-			thread_exit();
+			exit_with_status ((int) f->R.rdi);
 			break;
 
 		case SYS_WRITE:
-			if (f->R.rdi == 1) {
-				putbuf(f->R.rsi, f->R.rdx);
+			/* TODO: 파일 쓰기(fd >= 2)는 파일 시스템 콜 작업에서 구현 */
+			if ((int) f->R.rdi == 1) {
+				putbuf ((const char *) f->R.rsi, (size_t) f->R.rdx);
+				f->R.rax = f->R.rdx;
 			}
 			break;
-	
+
 		default:
 			break;
 	}
 }
 
-static bool 
-syscall_invalid_memory(struct intr_frame *f) {
-	bool is_invalid = false;
+/* 종료 상태를 기록하고 프로세스를 끝낸다.
+ * 종료 메시지는 process_exit()에서 이 값을 읽어 출력한다. */
+static void
+exit_with_status (int status) {
+	thread_current ()->process_status = status;
+	thread_exit ();
+}
 
-	uint64_t addr = 0;
-	uint64_t size = 0;
-
-	switch(f->R.rax) {
+/* 시스템 콜이 받은 사용자 메모리가 잘못되었으면 true.
+ * 시스템 콜마다 포인터가 들어오는 레지스터와 크기가 다르다 (lib/user/syscall.c). */
+static bool
+syscall_invalid_memory (struct intr_frame *f) {
+	switch (f->R.rax) {
+		/* 파일 이름, 명령줄처럼 문자열을 받는 시스템 콜 (첫 번째 인자 rdi).
+		 * create의 두 번째 인자는 만들 파일의 크기라 메모리 검사와 관계없다. */
 		case SYS_CREATE:
-			size = f->R.rsi - 1;
-		case SYS_FORK:
-		case SYS_EXEC:
 		case SYS_REMOVE:
 		case SYS_OPEN:
-			addr = f->R.rdi;
-			break;
-		
+		case SYS_EXEC:
+		case SYS_FORK:
+			return !valid_user_string ((const char *) f->R.rdi);
+
+		/* 버퍼와 크기를 받는 시스템 콜 (rsi = 버퍼, rdx = 크기).
+		 * TODO: read는 커널이 버퍼에 쓰므로 쓰기 가능한 페이지인지도 확인해야 한다. */
 		case SYS_READ:
 		case SYS_WRITE:
-			addr = f->R.rsi;
-			size = f->R.rdx;
-			break;
+			return !valid_user_buffer ((const void *) f->R.rsi, (size_t) f->R.rdx);
+
 		default:
-			return is_invalid;
+			return false;
+	}
+}
+
+/* BUFFER부터 SIZE바이트가 모두 접근 가능한 사용자 메모리인지 확인한다. */
+static bool
+valid_user_buffer (const void *buffer, size_t size) {
+	uintptr_t start = (uintptr_t) buffer;
+	uintptr_t end;
+
+	/* 읽고 쓸 바이트가 없으면 메모리에 접근하지 않는다 (read-zero, write-zero). */
+	if (size == 0) {
+		return true;
 	}
 
-	if (addr >= USER_STACK) {
-		is_invalid = true;
+	/* NULL, 주소 + 크기 계산이 넘치는 경우 */
+	if (buffer == NULL || size - 1 > UINTPTR_MAX - start) {
+		return false;
 	}
-	else {
-		if ((addr + (size - 1)) >= USER_STACK || 
-		!pml4_get_page(thread_current()->pml4, (void *) addr) || 
-		!pml4_get_page(thread_current()->pml4, (void *) (addr + (size - 1)))) {
-			is_invalid = true;
+	end = start + size - 1;
+
+	/* 시작과 끝이 모두 사용자 영역(KERN_BASE 미만)이어야 한다. */
+	if (!is_user_vaddr ((void *) start) || !is_user_vaddr ((void *) end)) {
+		return false;
+	}
+
+	/* 버퍼가 걸친 모든 페이지가 매핑되어 있어야 한다 (중간 페이지 포함). */
+	for (uintptr_t page = (uintptr_t) pg_round_down (buffer); page <= end;
+			page += PGSIZE) {
+		if (pml4_get_page (thread_current ()->pml4, (void *) page) == NULL) {
+			return false;
 		}
 	}
-	
-	return is_invalid;
+	return true;
+}
+
+/* STR부터 '\0'까지의 문자열 전체가 접근 가능한 사용자 메모리인지 확인한다.
+ * 문자열은 길이를 미리 모르므로, 한 바이트씩 보면서
+ * 처음과 페이지가 바뀔 때마다 사용자 영역인지, 매핑되어 있는지 검사한다. */
+static bool
+valid_user_string (const char *str) {
+	const char *p = str;
+
+	if (str == NULL) {
+		return false;
+	}
+
+	for (;;) {
+		if (p == str || pg_ofs (p) == 0) {
+			if (!is_user_vaddr (p)
+					|| pml4_get_page (thread_current ()->pml4, p) == NULL) {
+				return false;
+			}
+		}
+		if (*p == '\0') {
+			return true;
+		}
+		p++;
+	}
 }

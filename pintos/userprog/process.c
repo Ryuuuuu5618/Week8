@@ -286,8 +286,9 @@ setup_arguments(int argc, char *argv[], struct intr_frame *if_) {
 	rsp -= sizeof (void *);
 	*(void **) rsp = NULL;
 	if_->rsp = rsp;
-
-	hex_dump (if_->rsp, (void *) if_->rsp, USER_STACK - if_->rsp, true);
+	
+	// 디버깅용
+	// hex_dump (if_->rsp, (void *) if_->rsp, USER_STACK - if_->rsp, true);
 
 	return true;
 }
@@ -320,6 +321,9 @@ process_exit (void) {
 	 * TODO: Implement process termination message (see
 	 * TODO: project2/process_termination.html).
 	 * TODO: We recommend you to implement process resource cleanup here. */
+
+	if (curr->pml4 != NULL)
+		printf ("%s: exit(%d)\n", curr->name, curr->exit_status);
 
 	/* [임시] 유저 프로세스(pml4 보유)가 끝나면 process_wait 깨우기 */
 	if (curr->pml4 != NULL)

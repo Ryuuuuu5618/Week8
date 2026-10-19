@@ -7,9 +7,12 @@
 #include "userprog/gdt.h"
 #include "threads/flags.h"
 #include "intrinsic.h"
+#include "threads/mmu.h"
+#include "threads/vaddr.h"
 
 void syscall_entry (void);
 void syscall_handler (struct intr_frame *);
+static bool valid_user_buffer (const void *buffer, unsigned size);
 
 /* System call.
  *
@@ -38,9 +41,72 @@ syscall_init (void) {
 }
 
 /* The main system call interface */
+// 시스템 콜 발생했을 때 저장된 사용자 프로그램의 CPU 상태를 가리키는 포인터
 void
-syscall_handler (struct intr_frame *f UNUSED) {
-	// TODO: Your implementation goes here.
-	printf ("system call!\n");
-	thread_exit ();
+syscall_handler (struct intr_frame *f) {
+	uint64_t syscall_no = f->R.rax; // 시스템 콜 번호
+    //uint64_t arg1 = f->R.rdi; // 첫 번째 arg (파일 디스크립터)
+
+	switch (syscall_no) {
+        case SYS_EXIT: {
+            int status = (int) f->R.rdi;
+            thread_current()->exit_status = status;
+            thread_exit();
+        }
+		case SYS_WRITE: {
+			int fd = (int) f->R.rdi;
+            const void *buffer = (const void *) f->R.rsi;
+            unsigned size = (unsigned) f->R.rdx;
+
+            if (!valid_user_buffer (buffer, size)) {
+                thread_current ()->exit_status = -1;
+                thread_exit ();
+            }
+
+            if (fd == 1) {
+                putbuf (buffer, size);
+                f->R.rax = size;
+            } else {
+                /* 파일 쓰기 미구현 */
+                f->R.rax = -1;
+            }
+            break;
+		}
+
+        default:
+            thread_exit();
+    }
+
+	// printf ("system call!\n");
+	// thread_exit ();
+}
+
+/* 버퍼 검사 함수 */
+static bool
+valid_user_buffer (const void *buffer, unsigned size) {
+    uintptr_t start = (uintptr_t) buffer;
+
+    /* 길이가 0이면 읽을 바이트가 없습니다. */
+    if (size == 0)
+        return true;
+
+    /* 주소 계산 오버플로와 커널 주소 영역 진입을 검사합니다. */
+    if (buffer == NULL || size - 1 > UINTPTR_MAX - start)
+        return false;
+
+    uintptr_t end = start + size - 1;
+
+    if (!is_user_vaddr ((void *) start) ||
+        !is_user_vaddr ((void *) end))
+        return false;
+
+    /* 버퍼가 걸치는 모든 페이지가 매핑되어 있는지 확인합니다. */
+    for (uintptr_t page = pg_round_down (start);
+         page <= end;
+         page += PGSIZE) {
+        if (pml4_get_page (thread_current ()->pml4, (void *) page) == NULL)
+            return false;
+    }
+
+    return true;
 }

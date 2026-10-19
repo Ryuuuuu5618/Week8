@@ -68,6 +68,7 @@ struct thread {
     tid_t tid;                          /* Thread identifier. */
     enum thread_status status;          /* Thread state. */
     char name[16];                      /* Name (for debugging purposes). */
+    int exit_status;                    /* Process exit status. */
     int priority;                       /* Base priority set by the thread. */
     int eff_priority;                   /* Effective priority, including donations. */
     int nice;

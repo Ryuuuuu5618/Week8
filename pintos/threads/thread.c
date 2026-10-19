@@ -590,6 +590,7 @@ init_thread(struct thread *t, const char *name, int priority)
 	t->waiting_lock = NULL;
 	list_init(&t->donations);
 	t->magic = THREAD_MAGIC;
+	t->process_status = -1;
 	list_push_back(&threads, &t->threads_elem);
 }
 

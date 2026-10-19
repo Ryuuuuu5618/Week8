@@ -11,6 +11,8 @@
 #include "userprog/gdt.h"
 #include "threads/flags.h"
 #include "intrinsic.h"
+#include "threads/palloc.h"
+#include "userprog/process.h"
 
 void syscall_entry (void);
 void syscall_handler (struct intr_frame *);
@@ -71,6 +73,38 @@ syscall_handler (struct intr_frame *f) {
 				f->R.rax = f->R.rdx;
 			}
 			break;
+		case SYS_EXEC: { // 현재 프로세스를 새 프로그램으로 바꿈
+			// 사용자 메모리에 커맨드 라인의 문자열 주소 넣어줌
+			const char *user_cmd = (const char *) f->R.rdi;
+			// 커맨드라인 복사용 커널 메모리 페이지 할당. 파싱하면서 데이터가 훼손되므로 원본 대신 복사본 넘기려고 하는 거임
+            char *kernel_cmd = palloc_get_page (0);
+			
+            if (kernel_cmd == NULL) // 실패하면 복사 못함. -1
+                exit_with_status (-1);
+
+            /* 사용자 명령줄을 커널 페이지에 복사합니다. */
+            size_t i;
+            for (i = 0; i < PGSIZE; i++) { // 문자열 끝 or 페이지 크기만큼 복사
+				// 의문: syscall_invalid_memory()가 사용자 문자열의 주소와 매핑을 검사... 한다는데 어떻게 하는거임?
+            	kernel_cmd[i] = user_cmd[i];
+                if (kernel_cmd[i] == '\0')
+                    break;
+            }
+
+            /* 한 페이지 안에 문자열 끝이 없으면 실패 처리합니다. */
+            if (i == PGSIZE) {
+                palloc_free_page (kernel_cmd);
+                exit_with_status (-1);
+            }
+
+            /* 성공하면 현재 프로세스가 새 프로그램으로 바뀝니다. */
+            if (process_exec (kernel_cmd) < 0)
+                exit_with_status (-1);
+
+            break;
+		}
+			
+			
 
 		default:
 			break;

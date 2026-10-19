@@ -266,6 +266,7 @@ static int sys_read(int fd, void *buffer, unsigned size)
 {
 	valid_buffer(buffer, size);
 
+	// 여기 부분 다시 공부하기
 	if (fd == 0)
 	{
 		uint8_t *buf = buffer;

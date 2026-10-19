@@ -59,6 +59,8 @@ syscall_handler (struct intr_frame *f) {
 		exit_with_status (-1);
 	}
 
+	struct thread *curr = thread_current();
+
 	switch (f->R.rax) {
 		case SYS_HALT:
 			power_off ();
@@ -90,6 +92,22 @@ syscall_handler (struct intr_frame *f) {
 			break;
 
 		case SYS_OPEN:
+			int fd = -1;
+			lock_acquire(&file_lock);
+			struct file *file_addr = filesys_open((char *)f->R.rdi);
+			lock_release(&file_lock);
+
+			if (file_addr != NULL) {
+				for (int i = 2; i < PGSIZE / sizeof(struct file *); i++) {
+					if (curr->file_descriptor[i] == NULL) {
+						fd = i;
+						curr->file_descriptor[i] = file_addr;						
+						break;
+					}
+				}
+			}
+
+			f->R.rax = fd;
 			break;
 
 		case SYS_FILESIZE:

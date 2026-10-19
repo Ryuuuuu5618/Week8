@@ -41,6 +41,7 @@ static bool setup_arguments (int argc, char *argv[], struct intr_frame *if_);
 static void
 process_init (void) {
 	struct thread *current = thread_current ();
+	current->file_descriptor = palloc_get_page(PAL_ZERO);
 }
 
 /* Starts the first userland program, called "initd", loaded from FILE_NAME.
@@ -328,6 +329,7 @@ process_exit (void) {
 	if (curr->pml4 != NULL) {
 		printf("%s: exit(%d)\n", curr->name, curr->process_status);
 		sema_up (&initd_exit_sema);
+		palloc_free_page(curr->file_descriptor);
 	}
 	process_cleanup ();
 }

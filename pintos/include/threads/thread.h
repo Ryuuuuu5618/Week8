@@ -80,6 +80,7 @@ struct thread {
     struct list_elem elem;              /* List element. */
     struct list_elem threads_elem;
     int process_status;                 /*프로세스 상태*/
+    struct file **file_descriptor;      /*파일 디스크럽터*/
 
 #ifdef USERPROG
     /* Owned by userprog/process.c. */

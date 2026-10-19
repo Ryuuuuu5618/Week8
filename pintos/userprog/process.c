@@ -287,8 +287,6 @@ setup_arguments(int argc, char *argv[], struct intr_frame *if_) {
 	*(void **) rsp = NULL;
 	if_->rsp = rsp;
 
-	hex_dump (if_->rsp, (void *) if_->rsp, USER_STACK - if_->rsp, true);
-
 	return true;
 }
 
@@ -320,6 +318,19 @@ process_exit (void) {
 	 * TODO: Implement process termination message (see
 	 * TODO: project2/process_termination.html).
 	 * TODO: We recommend you to implement process resource cleanup here. */
+
+	for (int fd = 2; fd < PGSIZE / sizeof(struct file *); fd++)
+	{
+		struct file *file = thread_current()->fd_table[fd];
+
+		if (file != NULL)
+		{
+			file_close(file);
+		}
+	}
+
+	palloc_free_page(thread_current()->fd_table);
+	thread_current()->fd_table = NULL;
 
 	/* [임시] 유저 프로세스(pml4 보유)가 끝나면 process_wait 깨우기 */
 	if (curr->pml4 != NULL)
@@ -443,6 +454,8 @@ load (const char *file_name, struct intr_frame *if_) {
 	if (t->pml4 == NULL)
 		goto done;
 	process_activate (thread_current ());
+
+	t->exit_status = -1;
 
 	/* Open executable file. */
 	file = filesys_open (file_name);

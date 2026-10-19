@@ -11,6 +11,9 @@
 void syscall_entry (void);
 void syscall_handler (struct intr_frame *);
 
+static int sys_write(int fd, const void *buffer, unsigned size);
+void sys_exit(int status);
+
 /* System call.
  *
  * Previously system call services was handled by the interrupt handler
@@ -39,8 +42,130 @@ syscall_init (void) {
 
 /* The main system call interface */
 void
-syscall_handler (struct intr_frame *f UNUSED) {
+syscall_handler (struct intr_frame *f) {
 	// TODO: Your implementation goes here.
-	printf ("system call!\n");
-	thread_exit ();
+
+	switch (f->R.rax)
+	{
+	case SYS_HALT:
+		power_off();
+		break;
+	
+	case SYS_EXIT:
+		sys_exit(f->R.rdi);
+		break;
+	
+	case SYS_CREATE:
+		break;
+
+	case SYS_OPEN:
+		break;
+
+	case SYS_WRITE:
+		f->R.rax = sys_write(f->R.rdi, (const void *)f->R.rsi, f->R.rdx);
+		break;
+	
+	default:
+		sys_exit(-1);
+		break;
+	}
+
+	// printf ("system call!\n");
+	// thread_exit ();
+}
+
+static struct file *fd_get(int fd)
+{
+	if (fd < 0 || fd >= PGSIZE / sizeof (struct file *))
+	{
+		return NULL;
+	}
+
+	return thread_current()->fd_table[fd];
+}
+
+static int fd_add(struct file *file)
+{
+	for (int fd = 2; fd < PGSIZE / sizeof (struct file *); fd++)
+	{
+		if (thread_current()->fd_table[fd] == NULL)
+		{
+			thread_current()->fd_table[fd] = file;
+			return fd;
+		}
+	}
+
+	return -1;
+}
+
+static void fd_close(int fd)
+{
+	struct file *file = fd_get(fd);
+
+	if (file == NULL)
+	{
+		return;
+	}
+
+	file_close(file);
+	thread_current()->fd_table[fd] = NULL;
+}
+
+static int sys_open(const char *file)
+{
+	struct file *file_name = filesys_open(file);
+
+	return (fd_get(file_name) != NULL) ? fd_get(file_name) : -1;
+}
+
+
+static void check_addr(const void *buffer)
+{
+	// 버퍼 주소 검증
+	if (buffer == NULL || (!is_user_vaddr(buffer)) || !pml4_get_page(thread_current()->pml4, buffer))
+	{
+		sys_exit(-1);
+	}
+}
+
+static void valid_buffer(const void *buffer, unsigned size)
+{
+	if (size == 0)
+	{
+		check_addr(buffer);
+		return;
+	}
+
+	for (void *addr = pg_round_down(buffer); addr < buffer + size; addr += PGSIZE)
+	{
+		check_addr(addr);
+	}
+}
+
+static int sys_write(int fd, const void *buffer, unsigned size)
+{
+	// 버퍼 주소 검증
+	valid_buffer(buffer, size);
+
+	// 화면 출력 -> fd가 1
+	if (fd == 1)
+	{
+		putbuf(buffer, size);
+		return size;
+	}
+	else if (fd < 0 || fd >= PGSIZE / sizeof (struct file *))
+	{
+		return -1;
+	}
+	else
+	{
+		file_write(thread_current()->fd_table[fd], buffer, size);
+	}
+}
+
+void sys_exit(int status)
+{
+	thread_current()->exit_status = status;
+	printf("%s: exit(%d)\n", thread_current()->name, status);
+	thread_exit();
 }

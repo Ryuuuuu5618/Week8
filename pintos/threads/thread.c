@@ -247,6 +247,17 @@ tid_t thread_create(const char *name, int priority,
 
 	/* Initialize thread. */
 	init_thread(t, name, priority);
+
+	// 파일 디스크립터 생성
+	t->fd_table = palloc_get_page(PAL_ZERO);
+	if (t->fd_table == NULL)
+	{
+		list_remove(&t->threads_elem);
+		palloc_free_page(t);
+		intr_set_level(old_level);
+		return TID_ERROR;
+	}
+	
 	tid = t->tid = allocate_tid();
 
 	/* Call the kernel_thread if it scheduled.
@@ -591,6 +602,8 @@ init_thread(struct thread *t, const char *name, int priority)
 	list_init(&t->donations);
 	t->magic = THREAD_MAGIC;
 	list_push_back(&threads, &t->threads_elem);
+
+	t->fd_table = NULL;
 }
 
 /* Chooses and returns the next thread to be scheduled.  Should

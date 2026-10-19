@@ -21,13 +21,21 @@
 #ifdef VM
 #include "vm/vm.h"
 #endif
+#include "threads/synch.h"
+
+/* 한 명령어에서 받을 최대 인자 수 (argv 배열이 커널 스택에 잡히므로 너무 크게 두지 않음) */
+#define MAX_ARGS 64
+
+/* [임시] wait 구현 전까지 initd 종료를 기다리기 위한 세마포어 (from how-to-song)
+ * TODO: fork/wait 구현 시 자식별 세마포어로 교체 */
+static struct semaphore initd_exit_sema;
 
 static void process_cleanup (void);
 static bool load (const char *file_name, struct intr_frame *if_);
 static void initd (void *f_name);
 static void __do_fork (void *);
 
-static void argument_passing(struct intr_frame *_if, char **argv, int argc);
+static bool setup_arguments (int argc, char *argv[], struct intr_frame *if_);
 
 /* General process initializer for initd and other process. */
 static void
@@ -45,17 +53,29 @@ process_create_initd (const char *file_name) {
 	char *fn_copy;
 	tid_t tid;
 
-	char *tmp = strtok(tmp, " ");
-
 	/* Make a copy of FILE_NAME.
 	 * Otherwise there's a race between the caller and load(). */
 	fn_copy = palloc_get_page (0);
 	if (fn_copy == NULL)
 		return TID_ERROR;
-	strlcpy (fn_copy, tmp, PGSIZE);
+	strlcpy (fn_copy, file_name, PGSIZE);
+
+	/* 스레드 이름은 프로그램 이름(첫 단어)만 사용 (종료 메시지에 쓰임).
+	 * file_name은 const라 별도 버퍼에 복사한 뒤 자르고,
+	 * fn_copy는 인자 전달을 위해 전체 명령어를 그대로 유지한다. */
+	char name_buf[16];
+	char *name_save_ptr;
+	char *thread_name;
+	strlcpy (name_buf, file_name, sizeof name_buf);
+	/* 앞에 공백이 있어도 첫 단어를 이름으로 쓰도록 strtok_r의 반환값을 사용 */
+	thread_name = strtok_r (name_buf, " ", &name_save_ptr);
+	if (thread_name == NULL)
+		thread_name = name_buf;
+
+	sema_init (&initd_exit_sema, 0);
 
 	/* Create a new thread to execute FILE_NAME. */
-	tid = thread_create (tmp, PRI_DEFAULT, initd, fn_copy);
+	tid = thread_create (thread_name, PRI_DEFAULT, initd, fn_copy);
 	if (tid == TID_ERROR)
 		palloc_free_page (fn_copy);
 	return tid;
@@ -166,25 +186,28 @@ error:
  * Returns -1 on fail. */
 int
 process_exec (void *f_name) {
-	char *file_name = f_name;
-	
-	char *argv[64];
-	
-	char *saveptr;
-	char *token = strtok_r(f_name, " ", &saveptr);
-	
+	char *command_line = f_name;
+	char *argv[MAX_ARGS];
 	int argc = 0;
-
-	while (token != NULL && argc < 63)
-	{
-		argv[argc] = token;
-		token = strtok_r(NULL, " ", &saveptr);
-		argc++;
-	}
-	argv[argc] = NULL;
-
-	// 성공 -> 반환x || 실패 -> -1 반환
+	char *save_ptr;
 	bool success;
+
+	/* 공백 기준으로 파싱.
+	 * 인자가 MAX_ARGS를 넘으면 잘라서 실행하지 않고 실패로 처리한다. */
+	for (char *token = strtok_r (command_line, " ", &save_ptr); token != NULL;
+			token = strtok_r (NULL, " ", &save_ptr)) {
+		if (argc == MAX_ARGS) {
+			palloc_free_page (command_line);
+			return -1;
+		}
+		argv[argc++] = token;
+	}
+
+	/* 단어가 하나도 없으면 실패 */
+	if (argc == 0) {
+		palloc_free_page (command_line);
+		return -1;
+	}
 
 	/* We cannot use the intr_frame in the thread structure.
 	 * This is because when current thread rescheduled,
@@ -195,66 +218,76 @@ process_exec (void *f_name) {
 	_if.eflags = FLAG_IF | FLAG_MBS;
 
 	/* We first kill the current context */
-	process_cleanup();
+	process_cleanup ();
 
-	/* And then load the binary */
+	/* 실행 파일은 첫 번째 토큰임 */
 	success = load (argv[0], &_if);
-	if (!success)
-	{
-		palloc_free_page (file_name);
-		return -1;
-	}
 
-	argument_passing(&_if, argv, argc);
+	if (success)
+		success = setup_arguments(argc, argv, &_if);
 
+	// 인자를 스택에 복사한 후 원본 해제
+	palloc_free_page(command_line);
+	
 	/* If load failed, quit. */
-	palloc_free_page(file_name);
+	if (!success)
+		return -1;
 
 	/* Start switched process. */
 	do_iret (&_if);
 	NOT_REACHED ();
 }
 
-static void argument_passing(struct intr_frame *_if, char **argv, int argc)
-{
-	char *addr_list[argc];
+static bool
+setup_arguments(int argc, char *argv[], struct intr_frame *if_) {
+	if (argc < 1 || argc > MAX_ARGS)
+		return false;
+		
+	uintptr_t rsp = (uintptr_t) if_->rsp;	/* 스택 시작 주소 (USER_STACK) */
+	char *arg_addresses[MAX_ARGS];			/* 유저 스택에 복사한 문자열 주소 */
 
+	/* 전체 크기가 스택 한 페이지 안에 들어가는지 먼저 확인한다.
+	 * 문자열들 + 정렬 패딩(최대 7) + 포인터 칸(argc + 1) + 가짜 반환 주소 */
+	size_t total = 0;
 	for (int i = 0; i < argc; i++)
-	{
-		int str_length = strlen(argv[i]) + 1;
-		_if->rsp -= str_length;
+		total += strlen (argv[i]) + 1;
+	total += 7 + (argc + 1) * sizeof (char *) + sizeof (void *);
+	if (total > PGSIZE)
+		return false;
 
-    	memcpy((void *)_if->rsp, argv[i], str_length);
-		addr_list[i] = (char *)_if->rsp;
+	/* 인자 문자열을 스택에 복사한다. */
+	for (int i = argc - 1; i >= 0; i--) {
+		size_t len = strlen (argv[i]) + 1;
+		rsp -= len;
+		memcpy ((void *) rsp, argv[i], len);
+		arg_addresses[i] = (char *) rsp;
 	}
 
-	// 8바이트 정렬
-	int now_stack_length = USER_STACK - _if->rsp;
+	/* 포인터 배열을 8바이트 경계에 맞춘다. */
+	rsp &= ~((uintptr_t) 7);
 
-	int word_alignment = now_stack_length % 8;
-	if (word_alignment != 0)
-	{
-		_if->rsp -= word_alignment; 
+	/* argv[argc] = NULL */
+	rsp -= sizeof (char *);
+	*(char **) rsp = NULL;
+
+	/* argv[i]의 주소(유저 스택 주소)를 스택에 넣는다. */
+	for (int i = argc - 1; i >= 0; i--) {
+		rsp -= sizeof (char *);
+		*(char **) rsp = arg_addresses[i];
 	}
 
-	_if->rsp -= 8;
-	*(char **)(_if->rsp) = argv[argc];
+	char **user_argv = (char **) rsp;
 
-	// 문자열 주소, 메모리 주소 낮은 곳 -> 높은 곳 순으로 쌓아야 함
-	for (int i = argc - 1; i >= 0; i--)
-	{
-		_if->rsp -= 8;
-		*(char **)(_if->rsp) = (char *)addr_list[i];
-	}
+	/* _start(argc, argv)의 인자를 레지스터로 전달한다. */
+	if_->R.rdi = argc;
+	if_->R.rsi = (uintptr_t) user_argv;
 
-	// 인자 수
-	_if->R.rdi = argc;
-	// 인자 주소 시작 위치
-	_if->R.rsi = _if->rsp;
+	/* 가짜 반환 주소를 두고 최종 스택 포인터를 설정한다. */
+	rsp -= sizeof (void *);
+	*(void **) rsp = NULL;
+	if_->rsp = rsp;
 
-	// 가짜 주소 반환
-	_if->rsp -= 8;
-	*(char **)(_if->rsp) = 0;
+	return true;
 }
 
 /* Waits for thread TID to die and returns its exit status.  If
@@ -271,12 +304,8 @@ process_wait (tid_t child_tid UNUSED) {
 	/* XXX: Hint) The pintos exit if process_wait (initd), we recommend you
 	 * XXX:       to add infinite loop here before
 	 * XXX:       implementing the process_wait. */
-
-	// 무한 루프 제거해야 함
-	while (true)
-	{
-
-	}
+	/* [임시] initd가 끝날 때까지 대기 (무한 루프와 달리 Pintos가 정상 종료되어 판정 가능) */
+	sema_down (&initd_exit_sema);
 
 	return -1;
 }
@@ -289,6 +318,23 @@ process_exit (void) {
 	 * TODO: Implement process termination message (see
 	 * TODO: project2/process_termination.html).
 	 * TODO: We recommend you to implement process resource cleanup here. */
+
+	for (int fd = 2; fd < PGSIZE / sizeof(struct file *); fd++)
+	{
+		struct file *file = thread_current()->fd_table[fd];
+
+		if (file != NULL)
+		{
+			file_close(file);
+		}
+	}
+
+	palloc_free_page(thread_current()->fd_table);
+	thread_current()->fd_table = NULL;
+
+	/* [임시] 유저 프로세스(pml4 보유)가 끝나면 process_wait 깨우기 */
+	if (curr->pml4 != NULL)
+		sema_up (&initd_exit_sema);
 
 	process_cleanup ();
 }
@@ -408,6 +454,8 @@ load (const char *file_name, struct intr_frame *if_) {
 	if (t->pml4 == NULL)
 		goto done;
 	process_activate (thread_current ());
+
+	t->exit_status = -1;
 
 	/* Open executable file. */
 	file = filesys_open (file_name);
@@ -595,7 +643,6 @@ load_segment (struct file *file, off_t ofs, uint8_t *upage,
 
 		/* Add the page to the process's address space. */
 		if (!install_page (upage, kpage, writable)) {
-			printf("fail\n");
 			palloc_free_page (kpage);
 			return false;
 		}

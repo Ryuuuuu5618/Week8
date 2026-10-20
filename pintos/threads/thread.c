@@ -603,6 +603,8 @@ init_thread(struct thread *t, const char *name, int priority)
 	t->magic = THREAD_MAGIC;
 	list_push_back(&threads, &t->threads_elem);
 
+	sema_init(&t->fork_sema, 1);
+
 	t->fd_table = NULL;
 }
 

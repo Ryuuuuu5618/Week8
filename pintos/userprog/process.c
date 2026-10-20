@@ -98,10 +98,19 @@ initd (void *f_name) {
 /* Clones the current process as `name`. Returns the new process's thread id, or
  * TID_ERROR if the thread cannot be created. */
 tid_t
-process_fork (const char *name, struct intr_frame *if_ UNUSED) {
+process_fork (const char *name, struct intr_frame *if_) {
 	/* Clone current thread to new thread.*/
-	return thread_create (name,
-			PRI_DEFAULT, __do_fork, thread_current ());
+
+	thread_current()->fork_if = if_;
+	
+	tid_t tid = thread_create (name, PRI_DEFAULT, __do_fork, thread_current ());
+	
+	if (tid != TID_ERROR)
+	{
+		sema_down(&thread_current()->fork_sema);
+	}
+
+	return (thread_current()->fork_succ) ? tid : TID_ERROR;
 }
 
 #ifndef VM
@@ -116,22 +125,43 @@ duplicate_pte (uint64_t *pte, void *va, void *aux) {
 	bool writable;
 
 	/* 1. TODO: If the parent_page is kernel page, then return immediately. */
+	if (is_kernel_vaddr(va))
+	{
+		return true;
+	}
 
 	/* 2. Resolve VA from the parent's page map level 4. */
 	parent_page = pml4_get_page (parent->pml4, va);
+	if (parent_page == NULL)
+	{
+		return false;
+	}
 
 	/* 3. TODO: Allocate new PAL_USER page for the child and set result to
 	 *    TODO: NEWPAGE. */
 
+	newpage = palloc_get_page(PAL_USER);
+	if (newpage == NULL)
+	{
+		return false;
+	}
+	
 	/* 4. TODO: Duplicate parent's page to the new page and
-	 *    TODO: check whether parent's page is writable or not (set WRITABLE
-	 *    TODO: according to the result). */
+	*    TODO: check whether parent's page is writable or not (set WRITABLE
+	*    TODO: according to the result). */
+
+	memcpy(newpage, parent_page, PGSIZE);
+	writable = is_writable(pte);
 
 	/* 5. Add new page to child's page table at address VA with WRITABLE
 	 *    permission. */
 	if (!pml4_set_page (current->pml4, va, newpage, writable)) {
 		/* 6. TODO: if fail to insert page, do error handling. */
+		palloc_free_page(newpage);
+
+		return false;
 	}
+
 	return true;
 }
 #endif
@@ -146,7 +176,7 @@ __do_fork (void *aux) {
 	struct thread *parent = (struct thread *) aux;
 	struct thread *current = thread_current ();
 	/* TODO: somehow pass the parent_if. (i.e. process_fork()'s if_) */
-	struct intr_frame *parent_if;
+	struct intr_frame *parent_if = parent->fork_if;
 	bool succ = true;
 
 	/* 1. Read the cpu context to local stack. */
@@ -173,12 +203,41 @@ __do_fork (void *aux) {
 	 * TODO:       from the fork() until this function successfully duplicates
 	 * TODO:       the resources of parent.*/
 
+	for (int fd = 2; fd < PGSIZE / sizeof(struct file *); fd++)
+	{
+		if (parent->fd_table[fd] == NULL)
+		{
+			continue;
+		}
+		
+		struct file *tmp = file_duplicate(parent->fd_table[fd]);
+
+		if (tmp == NULL)
+		{
+			goto error;
+		}
+
+		current->fd_table[fd] = tmp;
+	}
+
 	process_init ();
+
+	if_.R.rax = 0;
 
 	/* Finally, switch to the newly created process. */
 	if (succ)
+	{
+		// 성공 기록 + 부모 깨우기 ?? 세마 업...?
+		parent->fork_succ = true;
+
+		sema_up(&parent->fork_sema);
 		do_iret (&if_);
+	}
 error:
+	// 실패 기록 + 부모 깨우기 ?? 세마 업...?
+	parent->fork_succ = false;
+
+	sema_up(&parent->fork_sema);
 	thread_exit ();
 }
 

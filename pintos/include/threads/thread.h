@@ -6,6 +6,8 @@
 #include <stdint.h>
 #include "threads/interrupt.h"
 #include "threads/fixed-point.h"
+#include "threads/synch.h"
+
 #ifdef VM
 #include "vm/vm.h"
 #endif
@@ -81,6 +83,10 @@ struct thread {
     struct list_elem threads_elem;
     
     struct file **fd_table;
+    struct intr_frame *fork_if;
+
+    struct semaphore fork_sema;
+    bool fork_succ;
 
 #ifdef USERPROG
     /* Owned by userprog/process.c. */

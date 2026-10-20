@@ -13,11 +13,13 @@
 #include "filesys/filesys.h"
 #include "filesys/file.h"
 #include "devices/input.h"
+#include "userprog/process.h"
 
 void syscall_entry (void);
 void syscall_handler (struct intr_frame *);
 
 void sys_exit (int status);
+static tid_t sys_fork(struct intr_frame *f, const char *thread_name);
 static bool sys_create (const char *file, unsigned initial_size);
 static bool sys_remove (const char *file);
 static int sys_open (const char *file);
@@ -70,6 +72,7 @@ syscall_handler (struct intr_frame *f) {
 		break;
 
 	case SYS_FORK:
+		f->R.rax = sys_fork(f, (uint64_t)f->R.rdi);
 		break;
 
 	case SYS_EXEC:
@@ -189,14 +192,20 @@ static void valid_string(const char *file)
 	while (true)
 	{
 		check_addr(file + i);
-
+		
 		if (file[i] == '\0')
 		{
 			break;
 		}
-
+		
 		i++;
 	}
+}
+
+static tid_t sys_fork(struct intr_frame *f, const char *thread_name)
+{
+	valid_string(thread_name);
+	return process_fork(thread_name, f);
 }
 
 void sys_exit(int status)

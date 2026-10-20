@@ -11,6 +11,8 @@
 #include "userprog/gdt.h"
 #include "threads/flags.h"
 #include "intrinsic.h"
+#include "filesys/filesys.h"
+#include "filesys/file.h"
 
 struct lock file_lock;
 
@@ -21,6 +23,7 @@ static bool syscall_invalid_memory (struct intr_frame *);
 static bool valid_user_buffer (const void *buffer, size_t size);
 static bool valid_user_string (const char *str);
 static void exit_with_status (int status);
+static bool valid_fd (uint64_t fd , struct thread *curr);
 
 /* System call.
  *
@@ -60,6 +63,7 @@ syscall_handler (struct intr_frame *f) {
 	}
 
 	struct thread *curr = thread_current();
+	struct file *file;
 
 	switch (f->R.rax) {
 		case SYS_HALT:
@@ -94,31 +98,93 @@ syscall_handler (struct intr_frame *f) {
 		case SYS_OPEN:
 			int fd = -1;
 			lock_acquire(&file_lock);
-			struct file *file_addr = filesys_open((char *)f->R.rdi);
+			// f->R.rdi는 파일 이름, file는 파일 주소
+			file = filesys_open((char *)f->R.rdi);
 			lock_release(&file_lock);
 
-			if (file_addr != NULL) {
+			if (file != NULL) {
 				for (int i = 2; i < PGSIZE / sizeof(struct file *); i++) {
 					if (curr->file_descriptor[i] == NULL) {
 						fd = i;
-						curr->file_descriptor[i] = file_addr;						
+						curr->file_descriptor[i] = file;						
 						break;
 					}
 				}
+				if (fd == -1) file_close(file);
 			}
 
 			f->R.rax = fd;
 			break;
 
 		case SYS_FILESIZE:
+			if (valid_fd(f->R.rdi, curr)) {
+				f->R.rax = (uint64_t) file_length(curr->file_descriptor[f->R.rdi]);
+			}
+			else {
+				exit_with_status(-1);
+			}
+			break;
+		
+		case SYS_READ:
+			if ((int) f->R.rdi == 0) {
+				f->R.rax = input_getc();
+			}
+			else if (valid_fd(f->R.rdi, curr)) {
+				int read_size = -1;
+				lock_acquire(&file_lock);
+				read_size = (int) file_read(curr->file_descriptor[f->R.rdi], (void *)f->R.rsi, f->R.rdx);
+				lock_release(&file_lock);
+				f->R.rax = read_size;
+			}
+			else {
+				exit_with_status(-1);
+			}
 			break;
 
-
 		case SYS_WRITE:
-			/* TODO: 파일 쓰기(fd >= 2)는 파일 시스템 콜 작업에서 구현 */
 			if ((int) f->R.rdi == 1) {
 				putbuf ((const char *) f->R.rsi, (size_t) f->R.rdx);
 				f->R.rax = f->R.rdx;
+			}
+			else if (valid_fd(f->R.rdi, curr)) {
+				int write_size = 0;
+				lock_acquire(&file_lock);
+				write_size = (int) file_write(curr->file_descriptor[f->R.rdi], (void *)f->R.rsi, f->R.rdx);
+				lock_release(&file_lock);
+				f->R.rax = write_size;
+			}
+			else {
+				exit_with_status(-1);
+			}
+			break;
+
+		case SYS_SEEK:
+			if (valid_fd(f->R.rdi, curr)) {
+				file_seek(curr->file_descriptor[f->R.rdi], f->R.rsi);
+			} 
+			else {
+				exit_with_status(-1);
+			}
+			break;
+
+		case SYS_TELL:
+			if (valid_fd(f->R.rdi, curr)) {
+				f->R.rax = file_tell(curr->file_descriptor[f->R.rdi]);
+			} 
+			else {
+				exit_with_status(-1);
+			}
+			break;
+
+		case SYS_CLOSE:
+			if (valid_fd(f->R.rdi, curr)) {
+				lock_acquire(&file_lock);
+				file_close(curr->file_descriptor[f->R.rdi]);
+				lock_release(&file_lock);
+				curr->file_descriptor[f->R.rdi] = NULL;
+			}
+			else {
+				exit_with_status(-1);
 			}
 			break;
 
@@ -215,4 +281,11 @@ valid_user_string (const char *str) {
 		}
 		p++;
 	}
+}
+
+static bool
+valid_fd (uint64_t fd , struct thread *curr) {
+	return 	fd > 1 && 
+			fd < PGSIZE / sizeof(struct file *) && 
+			curr->file_descriptor[fd] != NULL;
 }

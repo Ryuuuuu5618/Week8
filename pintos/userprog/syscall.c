@@ -120,8 +120,17 @@ syscall_handler (struct intr_frame *f) {
 			f->R.rax = success;
 			break;
 		}
-		
-			
+		case SYS_REMOVE: {
+			const char *file = (const char*) f->R.rdi;
+
+			lock_acquire(&filesys_lock);
+			bool success = filesys_remove(file);
+			lock_release(&filesys_lock);
+
+			f->R.rax = success;
+			break;
+		}
+
 			
 
 		default:

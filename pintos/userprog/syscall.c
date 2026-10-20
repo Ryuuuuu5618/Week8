@@ -13,6 +13,8 @@
 #include "intrinsic.h"
 #include "threads/palloc.h"
 #include "userprog/process.h"
+#include "filesys/filesys.h"
+#include "threads/synch.h"
 
 void syscall_entry (void);
 void syscall_handler (struct intr_frame *);
@@ -21,6 +23,8 @@ static bool syscall_invalid_memory (struct intr_frame *);
 static bool valid_user_buffer (const void *buffer, size_t size);
 static bool valid_user_string (const char *str);
 static void exit_with_status (int status);
+
+static struct lock filesys_lock;
 
 /* System call.
  *
@@ -46,6 +50,8 @@ syscall_init (void) {
 	 * mode stack. Therefore, we masked the FLAG_FL. */
 	write_msr(MSR_SYSCALL_MASK,
 			FLAG_IF | FLAG_TF | FLAG_DF | FLAG_IOPL | FLAG_AC | FLAG_NT);
+
+	lock_init (&filesys_lock);
 }
 
 /* The main system call interface */
@@ -85,7 +91,6 @@ syscall_handler (struct intr_frame *f) {
             /* 사용자 명령줄을 커널 페이지에 복사합니다. */
             size_t i;
             for (i = 0; i < PGSIZE; i++) { // 문자열 끝 or 페이지 크기만큼 복사
-				// 의문: syscall_invalid_memory()가 사용자 문자열의 주소와 매핑을 검사... 한다는데 어떻게 하는거임?
             	kernel_cmd[i] = user_cmd[i];
                 if (kernel_cmd[i] == '\0')
                     break;
@@ -103,6 +108,19 @@ syscall_handler (struct intr_frame *f) {
 
             break;
 		}
+		case SYS_CREATE: {
+			const char *file = (const char*) f->R.rdi; // 파일 문자열 주소
+			off_t initial_size = (off_t) f->R.rsi; // 크기
+			// off_t: 파일 안에서 바이트 위치(오프셋)나 파일 크기를 나타낼 때 사용하는 정수 타입
+
+			lock_acquire(&filesys_lock); // 락 얻기 (다른 스레드가 파일 시스템 쓰지 못하게)
+			bool success = filesys_create(file, initial_size); // 성공했는지 보고
+			lock_release(&filesys_lock); // 락 릴리즈
+
+			f->R.rax = success;
+			break;
+		}
+		
 			
 			
 

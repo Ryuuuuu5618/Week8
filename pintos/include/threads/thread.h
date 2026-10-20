@@ -81,6 +81,7 @@ struct thread {
     struct list_elem threads_elem;
     int process_status;                 /*프로세스 상태*/
     struct file **file_descriptor;      /*파일 디스크럽터*/
+    struct intr_frame *curr_if;   /*현재 레지스터 상태*/
 
 #ifdef USERPROG
     /* Owned by userprog/process.c. */

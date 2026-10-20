@@ -99,10 +99,13 @@ initd (void *f_name) {
 /* Clones the current process as `name`. Returns the new process's thread id, or
  * TID_ERROR if the thread cannot be created. */
 tid_t
-process_fork (const char *name, struct intr_frame *if_ UNUSED) {
+process_fork (const char *name, struct intr_frame *if_) {
 	/* Clone current thread to new thread.*/
-	return thread_create (name,
-			PRI_DEFAULT, __do_fork, thread_current ());
+	thread_current()->curr_if = if_;
+	tid_t child_process = thread_create (name, PRI_DEFAULT, __do_fork, thread_current ());
+	process_wait(child_process);
+
+	return child_process;
 }
 
 #ifndef VM
@@ -117,21 +120,34 @@ duplicate_pte (uint64_t *pte, void *va, void *aux) {
 	bool writable;
 
 	/* 1. TODO: If the parent_page is kernel page, then return immediately. */
+	// 해당 가상 주소가 커널 영역이면 다음 주소로 넘어간다.
+	// 커널 영역 주소는 복사할 필요가 없기 때문
+	if (is_kernel_vaddr(va)) {
+		return true;
+	}
 
 	/* 2. Resolve VA from the parent's page map level 4. */
 	parent_page = pml4_get_page (parent->pml4, va);
 
 	/* 3. TODO: Allocate new PAL_USER page for the child and set result to
 	 *    TODO: NEWPAGE. */
+	newpage = palloc_get_page(PAL_USER);
+	if (newpage == NULL) {
+		return false;
+	}
 
 	/* 4. TODO: Duplicate parent's page to the new page and
 	 *    TODO: check whether parent's page is writable or not (set WRITABLE
 	 *    TODO: according to the result). */
+	writable = (bool)is_writable(pte);
+	memcpy(newpage, parent_page, PGSIZE);
 
 	/* 5. Add new page to child's page table at address VA with WRITABLE
 	 *    permission. */
 	if (!pml4_set_page (current->pml4, va, newpage, writable)) {
 		/* 6. TODO: if fail to insert page, do error handling. */
+		palloc_free_page(newpage);
+		return false;
 	}
 	return true;
 }
@@ -147,7 +163,7 @@ __do_fork (void *aux) {
 	struct thread *parent = (struct thread *) aux;
 	struct thread *current = thread_current ();
 	/* TODO: somehow pass the parent_if. (i.e. process_fork()'s if_) */
-	struct intr_frame *parent_if;
+	struct intr_frame *parent_if = parent->curr_if;
 	bool succ = true;
 
 	/* 1. Read the cpu context to local stack. */
@@ -175,6 +191,16 @@ __do_fork (void *aux) {
 	 * TODO:       the resources of parent.*/
 
 	process_init ();
+
+	for (int i = 0; i < PGSIZE / sizeof(struct file *); i++) {
+		if (parent->file_descriptor[i] != NULL) {
+			lock_acquire(&file_lock);
+			current->file_descriptor[i] = file_duplicate(parent->file_descriptor[i]);
+			lock_release(&file_lock);
+		}
+	}
+
+	if_.R.rax = 0;
 
 	/* Finally, switch to the newly created process. */
 	if (succ)

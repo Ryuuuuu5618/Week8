@@ -28,7 +28,7 @@ static bool valid_user_string (const char *str);
 static void exit_with_status (int status);
 static bool valid_fd (uint64_t fd , struct thread *curr);
 
-static tid_t sys_fork(const char *thread_name);
+static tid_t sys_fork(const char *thread_name, struct intr_frame *f);
 static int sys_exec(const char *file);
 static int sys_wait(tid_t pid);
 static bool sys_create(const char *file, unsigned initial_size);
@@ -88,7 +88,7 @@ syscall_handler (struct intr_frame *f) {
 			break;
 
 		case SYS_FORK:
-			sys_fork((char *)f->R.rdi);
+			f->R.rax = sys_fork((char *)f->R.rdi, f);
 			break;
 		
 		case SYS_EXEC:
@@ -251,8 +251,8 @@ valid_fd (uint64_t fd , struct thread *curr) {
 }
 
 static tid_t
-sys_fork (const char *thread_name){
-	return (tid_t) 0;
+sys_fork (const char *thread_name, struct intr_frame *f){
+	return process_fork(thread_name, f);
 }
 
 static int
@@ -300,7 +300,7 @@ sys_open (const char *file) {
 		for (int i = 2; i < PGSIZE / sizeof(struct file *); i++) {
 			if (curr->file_descriptor[i] == NULL) {
 				fd = i;
-				curr->file_descriptor[i] = opened_file;						
+				curr->file_descriptor[i] = opened_file;			
 				break;
 			}
 		}

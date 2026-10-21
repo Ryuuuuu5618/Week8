@@ -37,6 +37,13 @@ static void __do_fork (void *);
 
 static bool setup_arguments (int argc, char *argv[], struct intr_frame *if_);
 
+struct fork_aux {
+    struct thread *parent;
+    struct intr_frame parent_if;
+    struct semaphore fork_sema;
+    bool success;
+};
+
 /* General process initializer for initd and other process. */
 static void
 process_init (void) {
@@ -98,10 +105,37 @@ initd (void *f_name) {
 /* Clones the current process as `name`. Returns the new process's thread id, or
  * TID_ERROR if the thread cannot be created. */
 tid_t
-process_fork (const char *name, struct intr_frame *if_ UNUSED) {
+process_fork (const char *name, struct intr_frame *if_) { // fork해서 자식 스레드 만들고 tid리턴
 	/* Clone current thread to new thread.*/
-	return thread_create (name,
-			PRI_DEFAULT, __do_fork, thread_current ());
+	// return thread_create (name,
+	// 		PRI_DEFAULT, __do_fork, thread_current ());
+	struct fork_aux *aux = palloc_get_page (0); // 자식에게 넘길 정보 저장용 페이지
+    if (aux == NULL) // 메모리 할당 실패시 에러 반환
+        return TID_ERROR;
+
+    aux->parent = thread_current (); // 부모 주소 저장
+    memcpy (&aux->parent_if, if_, sizeof *if_); // 부모 상태 저장
+
+	// 초기화
+	sema_init (&aux->fork_sema, 0);
+    aux->success = false;
+
+    tid_t tid = thread_create (name, PRI_DEFAULT, __do_fork, aux); // 자식 스레드 생성
+    if (tid == TID_ERROR) { // 에러났으면 페이지 해제
+        palloc_free_page (aux);
+		return TID_ERROR;
+	}
+
+	 // 자식이 주소 공간 복제를 마치고 결과를 기록할 때까지 기다림
+     // 세마포어 값이 0이므로 여기서 잠들고, 자식의 sema_up()에 깨어납니다.
+    sema_down (&aux->fork_sema);
+
+    bool success = aux->success;
+
+	// 자식이 결과 기록 후 sema up까지 했으니까 aux 페이지 해제
+    palloc_free_page (aux);
+	
+    return success ? tid : TID_ERROR;
 }
 
 #ifndef VM
@@ -110,29 +144,32 @@ process_fork (const char *name, struct intr_frame *if_ UNUSED) {
 static bool
 duplicate_pte (uint64_t *pte, void *va, void *aux) {
 	struct thread *current = thread_current ();
-	struct thread *parent = (struct thread *) aux;
-	void *parent_page;
-	void *newpage;
-	bool writable;
+    struct thread *parent = aux;
 
-	/* 1. TODO: If the parent_page is kernel page, then return immediately. */
+    /* 커널 페이지는 자식의 사용자 주소 공간에 복사하지 않습니다. */
+    if (is_kern_pte (pte))
+        return true;
 
-	/* 2. Resolve VA from the parent's page map level 4. */
-	parent_page = pml4_get_page (parent->pml4, va);
+    /* 부모 주소 공간에서 VA에 연결된 페이지를 찾습니다. */
+    void *parent_page = pml4_get_page (parent->pml4, va);
+    if (parent_page == NULL)
+        return false;
 
-	/* 3. TODO: Allocate new PAL_USER page for the child and set result to
-	 *    TODO: NEWPAGE. */
+    /* 자식이 소유할 페이지를 할당하고 내용을 복사합니다. */
+    void *newpage = palloc_get_page (PAL_USER);
+    if (newpage == NULL)
+        return false;
 
-	/* 4. TODO: Duplicate parent's page to the new page and
-	 *    TODO: check whether parent's page is writable or not (set WRITABLE
-	 *    TODO: according to the result). */
+    memcpy (newpage, parent_page, PGSIZE);
 
-	/* 5. Add new page to child's page table at address VA with WRITABLE
-	 *    permission. */
-	if (!pml4_set_page (current->pml4, va, newpage, writable)) {
-		/* 6. TODO: if fail to insert page, do error handling. */
-	}
-	return true;
+    /* 부모 페이지의 쓰기 권한을 자식에게도 적용합니다. */
+    bool writable = is_writable (pte);
+    if (!pml4_set_page (current->pml4, va, newpage, writable)) {
+        palloc_free_page (newpage);
+        return false;
+    }
+
+    return true;
 }
 #endif
 
@@ -142,44 +179,58 @@ duplicate_pte (uint64_t *pte, void *va, void *aux) {
  *       this function. */
 static void
 __do_fork (void *aux) {
-	struct intr_frame if_;
-	struct thread *parent = (struct thread *) aux;
-	struct thread *current = thread_current ();
-	/* TODO: somehow pass the parent_if. (i.e. process_fork()'s if_) */
-	struct intr_frame *parent_if;
-	bool succ = true;
+	struct fork_aux *fork_aux = aux;
+    struct thread *parent = fork_aux->parent;
+    struct thread *current = thread_current ();
+    struct intr_frame if_;
 
-	/* 1. Read the cpu context to local stack. */
-	memcpy (&if_, parent_if, sizeof (struct intr_frame));
+    /* fork가 호출된 순간의 부모 레지스터 상태를 복사합니다. */
+    memcpy (&if_, &fork_aux->parent_if, sizeof if_);
 
-	/* 2. Duplicate PT */
-	current->pml4 = pml4_create();
-	if (current->pml4 == NULL)
-		goto error;
+    /*
+     * 자식 프로세스에서 fork()의 반환값은 0이어야 합니다.
+     * 부모는 process_fork()에서 자식의 TID를 반환합니다.
+     */
+    if_.R.rax = 0;
 
-	process_activate (current);
+    bool success = true;
+
+    current->pml4 = pml4_create ();
+    if (current->pml4 == NULL)
+        success = false;
+
+    if (success) {
+        process_activate (current);
+
 #ifdef VM
-	supplemental_page_table_init (&current->spt);
-	if (!supplemental_page_table_copy (&current->spt, &parent->spt))
-		goto error;
+        supplemental_page_table_init (&current->spt);
+        if (!supplemental_page_table_copy (&current->spt, &parent->spt))
+            success = false;
 #else
-	if (!pml4_for_each (parent->pml4, duplicate_pte, parent))
-		goto error;
+        if (!pml4_for_each (parent->pml4, duplicate_pte, parent))
+            success = false;
 #endif
+    }
 
-	/* TODO: Your code goes here.
-	 * TODO: Hint) To duplicate the file object, use `file_duplicate`
-	 * TODO:       in include/filesys/file.h. Note that parent should not return
-	 * TODO:       from the fork() until this function successfully duplicates
-	 * TODO:       the resources of parent.*/
+    /*
+     * 파일 디스크립터 복제 같은 추가 자원 복제가 필요하다면
+     * 성공 여부를 결정하기 전에 이 위치에서 수행해야 합니다.
+     */
 
-	process_init ();
+    /* 결과를 먼저 기록한 뒤 부모를 깨웁니다. */
+    fork_aux->success = success;
+    sema_up (&fork_aux->fork_sema);
 
-	/* Finally, switch to the newly created process. */
-	if (succ)
-		do_iret (&if_);
-error:
-	thread_exit ();
+    /*
+     * sema_up() 이후에는 부모가 aux 페이지를 해제할 수 있으므로
+     * fork_aux를 더 이상 사용하지 않습니다.
+     */
+    if (!success)
+        thread_exit ();
+
+    process_init ();
+    do_iret (&if_);
+    NOT_REACHED ();
 }
 
 /* Switch the current execution context to the f_name.
@@ -416,6 +467,7 @@ struct ELF64_PHDR {
 	uint64_t p_memsz;
 	uint64_t p_align;
 };
+
 
 /* Abbreviations */
 #define ELF ELF64_hdr

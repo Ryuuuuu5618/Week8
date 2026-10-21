@@ -88,7 +88,7 @@ syscall_handler (struct intr_frame *f) {
             if (kernel_cmd == NULL) // 실패하면 복사 못함. -1
                 exit_with_status (-1);
 
-            /* 사용자 명령줄을 커널 페이지에 복사합니다. */
+            /* 사용자 명령줄을 커널 페이지에 복사 */
             size_t i;
             for (i = 0; i < PGSIZE; i++) { // 문자열 끝 or 페이지 크기만큼 복사
             	kernel_cmd[i] = user_cmd[i];
@@ -96,17 +96,21 @@ syscall_handler (struct intr_frame *f) {
                     break;
             }
 
-            /* 한 페이지 안에 문자열 끝이 없으면 실패 처리합니다. */
+            /* 한 페이지 안에 문자열 끝이 없으면 실패 처리 */
             if (i == PGSIZE) {
                 palloc_free_page (kernel_cmd);
                 exit_with_status (-1);
-            }
+            } 
 
-            /* 성공하면 현재 프로세스가 새 프로그램으로 바뀝니다. */
+            /* 성공하면 현재 프로세스가 새 프로그램으로 바뀜 */
             if (process_exec (kernel_cmd) < 0)
                 exit_with_status (-1);
 
             break;
+		}
+		case SYS_FORK: {
+			f->R.rax = process_fork ((const char *) f->R.rdi, f);
+    		break;
 		}
 		case SYS_CREATE: {
 			const char *file = (const char*) f->R.rdi; // 파일 문자열 주소
@@ -130,7 +134,14 @@ syscall_handler (struct intr_frame *f) {
 			f->R.rax = success;
 			break;
 		}
+		// case SYS_OPEN: {
+		// 	const char *name = (const char *) f->R.rdi;
+    	// 	struct thread *cur = thread_current ();
 
+		// 	/* 항목 할당 → filesys_open()을 락으로 보호
+		// 	→ 실패면 -1, 성공이면 fd를 목록에 저장하고 RAX로 반환 */
+		// 	break;
+		// }
 			
 
 		default:

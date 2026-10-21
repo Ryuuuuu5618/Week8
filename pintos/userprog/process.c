@@ -88,6 +88,9 @@ initd (void *f_name) {
 #endif
 
 	process_init ();
+	if (thread_current()->file_descriptor == NULL) {
+		PANIC("Fail to launch initd\n");
+	}
 
 	struct thread *current = thread_current();
 	struct thread *parent = current->parent;
@@ -201,16 +204,28 @@ __do_fork (void *aux) {
 	 * TODO:       the resources of parent.*/
 
 	process_init ();
+	if (current->file_descriptor == NULL) {
+		goto error;
+	}
 
 	for (int i = 0; i < PGSIZE / sizeof(struct file *); i++) {
 		if (parent->file_descriptor[i] != NULL) {
 			lock_acquire(&file_lock);
 			current->file_descriptor[i] = file_duplicate(parent->file_descriptor[i]);
 			lock_release(&file_lock);
+			// 부모 파일 디스크립터는 NULL이 아닌데 자식 파일 디스크립터가 NULL이면 복제 실패
+			if (current->file_descriptor[i] == NULL) {
+				goto error;
+			}
 		}
 	}
 
+	lock_acquire(&file_lock);
 	current->exec_file = file_duplicate(parent->exec_file);
+	lock_release(&file_lock);
+	if (parent->exec_file != NULL && current->exec_file == NULL) {
+		goto error;
+	}
 
 	list_push_back(&parent->child, &current->child_elem);
 	parent->success_fork = current->tid;
@@ -223,6 +238,7 @@ __do_fork (void *aux) {
 		do_iret (&if_);
 error:
 	parent->success_fork = TID_ERROR;
+	current->parent = NULL;
 	sema_up(&parent->create_sema);
 	thread_exit ();
 }
@@ -382,11 +398,13 @@ process_exit (void) {
 
 	if (curr->pml4 != NULL) {
 		printf("%s: exit(%d)\n", curr->name, curr->process_status);
-		for (int fd = 0; fd < PGSIZE / sizeof(struct file *); fd++) {
-			if (curr->file_descriptor[fd] != NULL) {
-				lock_acquire(&file_lock);
-				file_close(curr->file_descriptor[fd]);
-				lock_release(&file_lock);
+		if (curr->file_descriptor != NULL) {
+			for (int fd = 0; fd < PGSIZE / sizeof(struct file *); fd++) {
+				if (curr->file_descriptor[fd] != NULL) {
+					lock_acquire(&file_lock);
+					file_close(curr->file_descriptor[fd]);
+					lock_release(&file_lock);
+				}
 			}
 		}
 
@@ -404,8 +422,10 @@ process_exit (void) {
 
 		sema_up(&curr->wait_sema);
 
-		// 부모 프로세스가 끝났으면 이미 exit_sema를 세마 업 해놓음
-		sema_down(&curr->exit_sema);
+		if (curr->parent != NULL) {
+			// 부모 프로세스가 끝났으면 이미 exit_sema를 세마 업 해놓음
+			sema_down(&curr->exit_sema);
+		}
 	}
 
 
@@ -521,6 +541,7 @@ load (const char *file_name, struct intr_frame *if_) {
 	off_t file_ofs;
 	bool success = false;
 	int i;
+	struct file *prev_file = t->exec_file;
 
 	/* Allocate and activate page directory. */
 	t->pml4 = pml4_create ();
@@ -534,7 +555,7 @@ load (const char *file_name, struct intr_frame *if_) {
 		printf ("load: %s: open failed\n", file_name);
 		goto done;
 	}
-	file_close(t->exec_file);
+
 	t->exec_file = file;
 	file_deny_write(file);
 
@@ -618,8 +639,10 @@ load (const char *file_name, struct intr_frame *if_) {
 done:
 	/* We arrive here whether the load is successful or not. */
 	if (!success) {
+		t->exec_file = NULL;
 		file_close (file);
 	}
+	file_close (prev_file);
 	return success;
 }
 

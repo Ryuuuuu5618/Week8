@@ -7,7 +7,6 @@
 #include "threads/interrupt.h"
 #include "threads/fixed-point.h"
 #include "threads/synch.h"
-
 #ifdef VM
 #include "vm/vm.h"
 #endif
@@ -81,17 +80,26 @@ struct thread {
     /* Shared between thread.c and synch.c. */
     struct list_elem elem;              /* List element. */
     struct list_elem threads_elem;
-    
-    struct file **fd_table;
-    struct intr_frame *fork_if;
+    int process_status;                 /*프로세스 상태*/
 
+    /* 파일 디스크립터 테이블 (fd = 인덱스, 0/1은 표준 입출력 자리) */
+    struct file **fd_table;
+
+    /* fork: 부모의 유저 레지스터, 복제 완료 대기, 복제 결과 */
+    struct intr_frame *fork_if;
     struct semaphore fork_sema;
     bool fork_succ;
+
+    /* wait: 부모-자식 연결, 종료 대기, 해제 대기 */
+    struct list child_list;
+    struct list_elem child_elem;
+    struct thread *parent;
+    struct semaphore wait_sema;
+    struct semaphore free_sema;
 
 #ifdef USERPROG
     /* Owned by userprog/process.c. */
     uint64_t *pml4;                     /* Page map level 4 */
-    int exit_status;
 #endif
 #ifdef VM
     /* Table for whole virtual memory owned by thread. */

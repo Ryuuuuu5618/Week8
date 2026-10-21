@@ -6,6 +6,7 @@
 #include <stdint.h>
 #include "threads/interrupt.h"
 #include "threads/fixed-point.h"
+#include "threads/synch.h"
 #ifdef VM
 #include "vm/vm.h"
 #endif
@@ -79,9 +80,22 @@ struct thread {
     /* Shared between thread.c and synch.c. */
     struct list_elem elem;              /* List element. */
     struct list_elem threads_elem;
+
     int process_status;                 /*프로세스 상태*/
     struct file **file_descriptor;      /*파일 디스크럽터*/
-    struct intr_frame *curr_if;   /*현재 레지스터 상태*/
+    struct intr_frame *curr_if;         /*현재 레지스터 상태*/
+
+    struct thread *parent;              /*부모 프로세스*/
+    struct list child;                  /*자식 프로세스를 저장하는 리스트*/
+    struct list_elem child_elem;        /*child리스트 요소*/
+
+    struct semaphore wait_sema;         /*wait()용 세마포어*/
+    struct semaphore create_sema;       /*thread_create()용 세마포어*/
+    struct semaphore exit_sema;         /*exit()시 자식이 부모를 기다리는 세마포어*/
+
+    int success_fork;                   /*fork() 성공*/
+
+    struct file *exec_file;             /*현재 실행 중인 파일*/
 
 #ifdef USERPROG
     /* Owned by userprog/process.c. */

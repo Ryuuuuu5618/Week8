@@ -98,6 +98,7 @@ syscall_handler (struct intr_frame *f) {
 			break;
 
 		case SYS_WAIT:
+			f->R.rax = sys_wait((tid_t) f->R.rdi);
 			break;
 
 		case SYS_CREATE:
@@ -267,7 +268,7 @@ sys_exec (const char *file) {
 
 static int
 sys_wait (tid_t pid) {
-	return 0;
+	return process_wait(pid);
 }
 
 static bool

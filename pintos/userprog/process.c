@@ -26,10 +26,6 @@
 /* 한 명령어에서 받을 최대 인자 수 (argv 배열이 커널 스택에 잡히므로 너무 크게 두지 않음) */
 #define MAX_ARGS 64
 
-/* [임시] wait 구현 전까지 initd 종료를 기다리기 위한 세마포어 (from how-to-song)
- * TODO: fork/wait 구현 시 자식별 세마포어로 교체 */
-static struct semaphore initd_exit_sema;
-
 static void process_cleanup (void);
 static bool load (const char *file_name, struct intr_frame *if_);
 static void initd (void *f_name);
@@ -73,12 +69,14 @@ process_create_initd (const char *file_name) {
 	if (thread_name == NULL)
 		thread_name = name_buf;
 
-	sema_init (&initd_exit_sema, 0);
-
 	/* Create a new thread to execute FILE_NAME. */
 	tid = thread_create (thread_name, PRI_DEFAULT, initd, fn_copy);
-	if (tid == TID_ERROR)
+	if (tid == TID_ERROR) {
 		palloc_free_page (fn_copy);
+		return tid;
+	}
+	sema_down(&thread_current()->create_sema);
+
 	return tid;
 }
 
@@ -91,6 +89,12 @@ initd (void *f_name) {
 
 	process_init ();
 
+	struct thread *current = thread_current();
+	struct thread *parent = current->parent;
+	list_push_back(&parent->child, &current->child_elem);
+	parent->success_fork = current->tid;
+	sema_up(&parent->create_sema);
+
 	if (process_exec (f_name) < 0)
 		PANIC("Fail to launch initd\n");
 	NOT_REACHED ();
@@ -101,10 +105,16 @@ initd (void *f_name) {
 tid_t
 process_fork (const char *name, struct intr_frame *if_) {
 	/* Clone current thread to new thread.*/
-	thread_current()->curr_if = if_;
+	struct thread *curr = thread_current();
+	curr->curr_if = if_;
 	tid_t child_process = thread_create (name, PRI_DEFAULT, __do_fork, thread_current ());
-	process_wait(child_process);
-
+	if (child_process == TID_ERROR) {
+		return -1;
+	}
+	sema_down(&curr->create_sema);
+	if (curr->success_fork == TID_ERROR) {
+		return -1;
+	}
 	return child_process;
 }
 
@@ -200,12 +210,20 @@ __do_fork (void *aux) {
 		}
 	}
 
+	current->exec_file = file_duplicate(parent->exec_file);
+
+	list_push_back(&parent->child, &current->child_elem);
+	parent->success_fork = current->tid;
+	sema_up(&parent->create_sema);
+
 	if_.R.rax = 0;
 
 	/* Finally, switch to the newly created process. */
 	if (succ)
 		do_iret (&if_);
 error:
+	parent->success_fork = TID_ERROR;
+	sema_up(&parent->create_sema);
 	thread_exit ();
 }
 
@@ -332,12 +350,23 @@ setup_arguments(int argc, char *argv[], struct intr_frame *if_) {
  * This function will be implemented in problem 2-2.  For now, it
  * does nothing. */
 int
-process_wait (tid_t child_tid UNUSED) {
+process_wait (tid_t child_tid) {
 	/* XXX: Hint) The pintos exit if process_wait (initd), we recommend you
 	 * XXX:       to add infinite loop here before
 	 * XXX:       implementing the process_wait. */
-	/* [임시] initd가 끝날 때까지 대기 (무한 루프와 달리 Pintos가 정상 종료되어 판정 가능) */
-	sema_down (&initd_exit_sema);
+
+	struct thread *curr = thread_current();
+	struct list_elem *child_thread_elem;
+	for (child_thread_elem = list_begin(&curr->child); child_thread_elem != list_end(&curr->child); child_thread_elem = list_next(child_thread_elem)) {
+		struct thread *child_thread = list_entry(child_thread_elem, struct thread, child_elem);
+		if (child_tid == child_thread->tid) {
+			list_remove(child_thread_elem);
+			sema_down(&child_thread->wait_sema);
+			int child_exit_status = child_thread->process_status;
+			sema_up(&child_thread->exit_sema);
+			return child_exit_status;
+		}
+	}
 
 	return -1;
 }
@@ -351,7 +380,6 @@ process_exit (void) {
 	 * TODO: project2/process_termination.html).
 	 * TODO: We recommend you to implement process resource cleanup here. */
 
-	/* [임시] 유저 프로세스(pml4 보유)가 끝나면 process_wait 깨우기 */
 	if (curr->pml4 != NULL) {
 		printf("%s: exit(%d)\n", curr->name, curr->process_status);
 		for (int fd = 0; fd < PGSIZE / sizeof(struct file *); fd++) {
@@ -361,9 +389,26 @@ process_exit (void) {
 				lock_release(&file_lock);
 			}
 		}
+
+		file_close(curr->exec_file);
+
 		palloc_free_page(curr->file_descriptor);
-		sema_up (&initd_exit_sema);
+
+		struct list_elem *curr_child_elem = list_begin(&curr->child);
+		while (curr_child_elem != list_end(&curr->child)) {
+			struct list_elem *next_child_elem = list_next(curr_child_elem);
+			list_remove(curr_child_elem);
+			sema_up(&list_entry(curr_child_elem, struct thread, child_elem)->exit_sema);
+			curr_child_elem = next_child_elem;
+		}
+
+		sema_up(&curr->wait_sema);
+
+		// 부모 프로세스가 끝났으면 이미 exit_sema를 세마 업 해놓음
+		sema_down(&curr->exit_sema);
 	}
+
+
 	process_cleanup ();
 }
 
@@ -489,6 +534,9 @@ load (const char *file_name, struct intr_frame *if_) {
 		printf ("load: %s: open failed\n", file_name);
 		goto done;
 	}
+	file_close(t->exec_file);
+	t->exec_file = file;
+	file_deny_write(file);
 
 	/* Read and verify executable header. */
 	if (file_read (file, &ehdr, sizeof ehdr) != sizeof ehdr
@@ -569,7 +617,9 @@ load (const char *file_name, struct intr_frame *if_) {
 
 done:
 	/* We arrive here whether the load is successful or not. */
-	file_close (file);
+	if (!success) {
+		file_close (file);
+	}
 	return success;
 }
 

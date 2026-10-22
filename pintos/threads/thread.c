@@ -270,7 +270,9 @@ tid_t thread_create(const char *name, int priority,
 	t->tf.ss = SEL_KDSEG;
 	t->tf.cs = SEL_KCSEG;
 	t->tf.eflags = FLAG_IF;
-
+	t->parent = thread_current();
+	list_push_back(&thread_current()->child_list, &t->child_elem);
+	
 	/* Add to run queue. */
 	thread_unblock(t);
 
@@ -602,8 +604,11 @@ init_thread(struct thread *t, const char *name, int priority)
 	list_init(&t->donations);
 	t->magic = THREAD_MAGIC;
 	list_push_back(&threads, &t->threads_elem);
+	list_init(&t->child_list);
 
-	sema_init(&t->fork_sema, 1);
+	sema_init(&t->fork_sema, 0);
+	sema_init(&t->wait_sema, 0);
+	sema_init(&t->free_sema, 0);
 
 	t->fd_table = NULL;
 }

@@ -14,12 +14,16 @@
 #include "filesys/file.h"
 #include "devices/input.h"
 #include "userprog/process.h"
+#include <stddef.h>
+#include "threads/palloc.h"
 
 void syscall_entry (void);
 void syscall_handler (struct intr_frame *);
 
 void sys_exit (int status);
 static tid_t sys_fork(struct intr_frame *f, const char *thread_name);
+static void sys_exec(const char *file);
+static int sys_wait(tid_t pid);
 static bool sys_create (const char *file, unsigned initial_size);
 static bool sys_remove (const char *file);
 static int sys_open (const char *file);
@@ -43,6 +47,8 @@ static void sys_close (int fd);
 #define MSR_LSTAR 0xc0000082        /* Long mode SYSCALL target */
 #define MSR_SYSCALL_MASK 0xc0000084 /* Mask for the eflags */
 
+struct lock lock;
+
 void
 syscall_init (void) {
 	write_msr(MSR_STAR, ((uint64_t)SEL_UCSEG - 0x10) << 48  |
@@ -54,6 +60,8 @@ syscall_init (void) {
 	 * mode stack. Therefore, we masked the FLAG_FL. */
 	write_msr(MSR_SYSCALL_MASK,
 			FLAG_IF | FLAG_TF | FLAG_DF | FLAG_IOPL | FLAG_AC | FLAG_NT);
+
+	lock_init(&lock);
 }
 
 /* The main system call interface */
@@ -72,13 +80,15 @@ syscall_handler (struct intr_frame *f) {
 		break;
 
 	case SYS_FORK:
-		f->R.rax = sys_fork(f, (uint64_t)f->R.rdi);
+		f->R.rax = sys_fork(f, (const char *)f->R.rdi);
 		break;
 
 	case SYS_EXEC:
+		sys_exec((const char *)f->R.rdi);
 		break;
 	
 	case SYS_WAIT:
+		f->R.rax = sys_wait(f->R.rdi);
 		break;
 	
 	case SYS_CREATE:
@@ -121,9 +131,6 @@ syscall_handler (struct intr_frame *f) {
 		sys_exit(-1);
 		break;
 	}
-	
-	// printf ("system call!\n");
-	// thread_exit ();
 }
 
 static struct file *fd_get(int fd)
@@ -159,7 +166,10 @@ static void fd_close(int fd)
 		return;
 	}
 	
+	lock_acquire(&lock);
 	file_close(file);
+	lock_release(&lock);
+
 	thread_current()->fd_table[fd] = NULL;
 }
 
@@ -189,6 +199,7 @@ static void valid_buffer(const void *buffer, unsigned size)
 static void valid_string(const char *file)
 {
 	int i = 0;
+	
 	while (true)
 	{
 		check_addr(file + i);
@@ -205,7 +216,31 @@ static void valid_string(const char *file)
 static tid_t sys_fork(struct intr_frame *f, const char *thread_name)
 {
 	valid_string(thread_name);
+	
 	return process_fork(thread_name, f);
+}
+
+static void sys_exec(const char *file)
+{
+	valid_string(file);
+	char *name = palloc_get_page(0);
+	
+	if (name == NULL)
+	{
+		sys_exit(-1);
+	}
+	
+	strlcpy(name, file, PGSIZE);
+
+	if (process_exec(name) == -1)
+	{
+		sys_exit(-1);
+	}
+}
+
+static int sys_wait(tid_t pid)
+{
+	return process_wait(pid);
 }
 
 void sys_exit(int status)
@@ -219,7 +254,11 @@ static bool sys_create(const char *file, unsigned initial_size)
 {
 	valid_string(file);
 
-	return filesys_create(file, initial_size);
+	lock_acquire(&lock);
+	bool succ = filesys_create(file, initial_size);
+	lock_release(&lock);
+
+	return succ;
 }
 
 static bool sys_remove(const char *file)
@@ -230,17 +269,23 @@ static bool sys_remove(const char *file)
 	}
 
 	valid_string(file);
-
 	check_addr(file);
 
-	return filesys_remove(file);
+	lock_acquire(&lock);
+	bool succ = filesys_remove(file);
+	lock_release(&lock);
+
+	return succ;
 }
 
 static int sys_open(const char *file)
 {
 	valid_string(file);
 
+	lock_acquire(&lock);
 	struct file *file_name = filesys_open(file);
+	lock_release(&lock);
+
 	if (file_name == NULL)
 	{
 		return -1;
@@ -254,7 +299,10 @@ static int sys_open(const char *file)
 	}
 	else
 	{	
+		lock_acquire(&lock);
 		file_close(file_name);
+		lock_release(&lock);
+
 		return -1;
 	}
 }
@@ -268,7 +316,11 @@ static int sys_filesize(int fd)
 		return -1;
 	}
 
-	return file_length(file);
+	lock_acquire(&lock);
+	off_t file_len = file_length(file);
+	lock_release(&lock);
+
+	return file_len;
 }
 
 static int sys_read(int fd, void *buffer, unsigned size)
@@ -295,10 +347,17 @@ static int sys_read(int fd, void *buffer, unsigned size)
 		return -1;
 	}
 
+	lock_acquire(&lock);
 	off_t pos = file_tell(file);
+	lock_release(&lock);
+	
 	off_t read_amount = (sys_filesize(fd) - pos < size) ? sys_filesize(fd) - pos : size;
+	
+	lock_acquire(&lock);
+	off_t read = file_read(file, buffer, read_amount);
+	lock_release(&lock);
 
-	return file_read(file, buffer, read_amount);
+	return read;
 }
 
 
@@ -319,7 +378,11 @@ static int sys_write(int fd, const void *buffer, unsigned size)
 	}
 	else
 	{
-		return file_write(thread_current()->fd_table[fd], buffer, size);
+		lock_acquire(&lock);
+		off_t write = file_write(thread_current()->fd_table[fd], buffer, size);
+		lock_release(&lock);
+
+		return write;
 	}
 }
 
@@ -332,7 +395,9 @@ static void sys_seek(int fd, unsigned position)
 		return;
 	}
 
+	lock_acquire(&lock);
 	file_seek(fd_get(fd), position);
+	lock_release(&lock);
 }
 
 static off_t sys_tell(int fd)
@@ -342,7 +407,11 @@ static off_t sys_tell(int fd)
 		return -1;
 	}
 
-	return file_tell(fd_get(fd));
+	lock_acquire(&lock);
+	off_t pos = file_tell(fd_get(fd));
+	lock_release(&lock);
+
+	return pos;
 }
 
 static void sys_close(int fd)

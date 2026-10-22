@@ -18,16 +18,19 @@
 #include "threads/mmu.h"
 #include "threads/vaddr.h"
 #include "intrinsic.h"
+#include "userprog/syscall.h"
 #ifdef VM
 #include "vm/vm.h"
 #endif
 #include "threads/synch.h"
 
+
+
 /* 한 명령어에서 받을 최대 인자 수 (argv 배열이 커널 스택에 잡히므로 너무 크게 두지 않음) */
 #define MAX_ARGS 64
 
 /* [임시] wait 구현 전까지 initd 종료를 기다리기 위한 세마포어 (from how-to-song)
- * TODO: fork/wait 구현 시 자식별 세마포어로 교체 */
+* TODO: fork/wait 구현 시 자식별 세마포어로 교체 */
 static struct semaphore initd_exit_sema;
 
 static void process_cleanup (void);
@@ -36,6 +39,8 @@ static void initd (void *f_name);
 static void __do_fork (void *);
 
 static bool setup_arguments (int argc, char *argv[], struct intr_frame *if_);
+
+extern struct lock lock;
 
 /* General process initializer for initd and other process. */
 static void
@@ -210,7 +215,9 @@ __do_fork (void *aux) {
 			continue;
 		}
 		
+		lock_acquire(&lock);
 		struct file *tmp = file_duplicate(parent->fd_table[fd]);
+		lock_release(&lock);
 
 		if (tmp == NULL)
 		{
@@ -218,6 +225,18 @@ __do_fork (void *aux) {
 		}
 
 		current->fd_table[fd] = tmp;
+	}
+
+	if (parent->running_file != NULL)
+	{
+		lock_acquire(&lock);
+		current->running_file = file_duplicate(parent->running_file);
+		lock_release(&lock);
+
+		if (current->running_file == NULL)
+		{
+			goto error;
+		}
 	}
 
 	process_init ();
@@ -278,6 +297,11 @@ process_exec (void *f_name) {
 
 	/* We first kill the current context */
 	process_cleanup ();
+
+	lock_acquire(&lock);
+	file_close(thread_current()->running_file);
+	thread_current()->running_file = NULL;
+	lock_release(&lock);
 
 	/* 실행 파일은 첫 번째 토큰임 */
 	success = load (argv[0], &_if);
@@ -359,14 +383,44 @@ setup_arguments(int argc, char *argv[], struct intr_frame *if_) {
  * This function will be implemented in problem 2-2.  For now, it
  * does nothing. */
 int
-process_wait (tid_t child_tid UNUSED) {
+process_wait (tid_t child_tid) {
 	/* XXX: Hint) The pintos exit if process_wait (initd), we recommend you
 	 * XXX:       to add infinite loop here before
 	 * XXX:       implementing the process_wait. */
-	/* [임시] initd가 끝날 때까지 대기 (무한 루프와 달리 Pintos가 정상 종료되어 판정 가능) */
-	sema_down (&initd_exit_sema);
+	/* XXX: 힌트) Pintos는 process_wait(initd)가 끝나면 종료됩니다.
+ 	 * XXX:       그래서 process_wait을 구현하기 전에는
+ 	 * XXX:       여기에 무한 루프를 넣어 두는 것을 추천합니다. */
+	
+	// [임시] initd가 끝날 때까지 대기 (무한 루프와 달리 Pintos가 정상 종료되어 판정 가능) */
+	
+	struct list_elem *child_list_elem = list_begin(&thread_current()->child_list);
+	struct thread *child_thread;
 
-	return -1;
+	while (child_list_elem != list_end(&thread_current()->child_list))
+	{
+		child_thread = list_entry(child_list_elem, struct thread, child_elem);
+		
+		if (child_thread->tid == child_tid)
+		{
+			break;
+		}
+		
+		child_list_elem = list_next(child_list_elem);
+	}
+
+	if (child_list_elem == list_end(&thread_current()->child_list))
+	{
+		return -1;
+	}
+	
+	sema_down(&child_thread->wait_sema);
+
+	int exit_status = child_thread->exit_status;
+
+	list_remove(child_list_elem);
+	sema_up(&child_thread->free_sema);
+
+	return exit_status;
 }
 
 /* Exit the process. This function is called by thread_exit (). */
@@ -384,16 +438,26 @@ process_exit (void) {
 
 		if (file != NULL)
 		{
+			lock_acquire(&lock);
 			file_close(file);
+			lock_release(&lock);
 		}
 	}
 
 	palloc_free_page(thread_current()->fd_table);
 	thread_current()->fd_table = NULL;
 
-	/* [임시] 유저 프로세스(pml4 보유)가 끝나면 process_wait 깨우기 */
+	lock_acquire(&lock);
+	file_close(thread_current()->running_file);
+	thread_current()->running_file = NULL;
+	lock_release(&lock);
+
 	if (curr->pml4 != NULL)
-		sema_up (&initd_exit_sema);
+	{
+		struct thread *parent = thread_current()->parent;
+		sema_up (&curr->wait_sema);
+		sema_down(&curr->free_sema);
+	}
 
 	process_cleanup ();
 }
@@ -517,35 +581,56 @@ load (const char *file_name, struct intr_frame *if_) {
 	t->exit_status = -1;
 
 	/* Open executable file. */
+	lock_acquire(&lock);
 	file = filesys_open (file_name);
+	lock_release(&lock);
+	
 	if (file == NULL) {
 		printf ("load: %s: open failed\n", file_name);
 		goto done;
 	}
 
+	lock_acquire(&lock);
+	file_deny_write(file);
+	lock_release(&lock);
+
 	/* Read and verify executable header. */
-	if (file_read (file, &ehdr, sizeof ehdr) != sizeof ehdr
-			|| memcmp (ehdr.e_ident, "\177ELF\2\1\1", 7)
-			|| ehdr.e_type != 2
-			|| ehdr.e_machine != 0x3E // amd64
-			|| ehdr.e_version != 1
-			|| ehdr.e_phentsize != sizeof (struct Phdr)
-			|| ehdr.e_phnum > 1024) {
+	lock_acquire(&lock);
+	off_t read = file_read (file, &ehdr, sizeof ehdr);
+	lock_release(&lock);
+
+	if (read != sizeof ehdr
+	|| memcmp (ehdr.e_ident, "\177ELF\2\1\1", 7)
+	|| ehdr.e_type != 2
+	|| ehdr.e_machine != 0x3E // amd64
+	|| ehdr.e_version != 1
+	|| ehdr.e_phentsize != sizeof (struct Phdr)
+	|| ehdr.e_phnum > 1024) {
 		printf ("load: %s: error loading executable\n", file_name);
 		goto done;
 	}
-
+	
 	/* Read program headers. */
 	file_ofs = ehdr.e_phoff;
 	for (i = 0; i < ehdr.e_phnum; i++) {
 		struct Phdr phdr;
 
-		if (file_ofs < 0 || file_ofs > file_length (file))
-			goto done;
-		file_seek (file, file_ofs);
+		lock_acquire(&lock);
+		off_t file_len = file_length (file);
+		lock_release(&lock);
 
-		if (file_read (file, &phdr, sizeof phdr) != sizeof phdr)
+		if (file_ofs < 0 || file_ofs > file_len)
 			goto done;
+		
+		lock_acquire(&lock);
+		file_seek (file, file_ofs);
+		off_t r = file_read (file, &phdr, sizeof phdr);
+		lock_release(&lock);
+
+		if (r != sizeof phdr)
+			goto done;
+	
+			
 		file_ofs += sizeof phdr;
 		switch (phdr.p_type) {
 			case PT_NULL:
@@ -599,10 +684,18 @@ load (const char *file_name, struct intr_frame *if_) {
 	 * TODO: Implement argument passing (see project2/argument_passing.html). */
 
 	success = true;
+	thread_current()->running_file = file;
+
 
 done:
 	/* We arrive here whether the load is successful or not. */
-	file_close (file);
+	if (!success)
+	{
+		lock_acquire(&lock);
+		file_close (file);
+		lock_release(&lock);
+	}
+
 	return success;
 }
 
@@ -616,7 +709,12 @@ validate_segment (const struct Phdr *phdr, struct file *file) {
 		return false;
 
 	/* p_offset must point within FILE. */
-	if (phdr->p_offset > (uint64_t) file_length (file))
+
+	lock_acquire(&lock);
+	uint64_t file_len = (uint64_t) file_length(file);
+	lock_release(&lock);
+
+	if (phdr->p_offset > file_len)
 		return false;
 
 	/* p_memsz must be at least as big as p_filesz. */
@@ -680,7 +778,10 @@ load_segment (struct file *file, off_t ofs, uint8_t *upage,
 	ASSERT (pg_ofs (upage) == 0);
 	ASSERT (ofs % PGSIZE == 0);
 
+	lock_acquire(&lock);
 	file_seek (file, ofs);
+	lock_release(&lock);
+	
 	while (read_bytes > 0 || zero_bytes > 0) {
 		/* Do calculate how to fill this page.
 		 * We will read PAGE_READ_BYTES bytes from FILE
@@ -694,7 +795,11 @@ load_segment (struct file *file, off_t ofs, uint8_t *upage,
 			return false;
 
 		/* Load this page. */
-		if (file_read (file, kpage, page_read_bytes) != (int) page_read_bytes) {
+		lock_acquire(&lock);
+		off_t read_amount = file_read (file, kpage, page_read_bytes);
+		lock_release(&lock);
+
+		if (read_amount != (int) page_read_bytes) {
 			palloc_free_page (kpage);
 			return false;
 		}

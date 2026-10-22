@@ -217,6 +217,19 @@ __do_fork (void *aux) {
 		current->fd_table[fd] = tmp;
 	}
 
+	/* 실행 중인 파일도 복제 (file_duplicate가 쓰기 금지 상태까지 복사한다) */
+	if (parent->running_file != NULL)
+	{
+		lock_acquire(&filesys_lock);
+		current->running_file = file_duplicate(parent->running_file);
+		lock_release(&filesys_lock);
+
+		if (current->running_file == NULL)
+		{
+			goto error;
+		}
+	}
+
 	process_init ();
 
 	if_.R.rax = 0;
@@ -275,6 +288,12 @@ process_exec (void *f_name) {
 
 	/* We first kill the current context */
 	process_cleanup ();
+
+	/* 이전 실행 파일을 닫는다 (쓰기 금지도 풀림) */
+	lock_acquire(&filesys_lock);
+	file_close(thread_current()->running_file);
+	thread_current()->running_file = NULL;
+	lock_release(&filesys_lock);
 
 	/* 실행 파일은 첫 번째 토큰임 */
 	success = load (argv[0], &_if);
@@ -426,6 +445,15 @@ process_exit (void) {
 		curr->fd_table = NULL;
 	}
 
+	/* 실행 중이던 파일을 닫는다 (쓰기 금지도 풀림) */
+	if (curr->running_file != NULL)
+	{
+		lock_acquire(&filesys_lock);
+		file_close(curr->running_file);
+		curr->running_file = NULL;
+		lock_release(&filesys_lock);
+	}
+
 	/* 유저 프로세스(pml4 보유)가 끝나면 기다리는 부모를 깨우고,
 	 * 부모가 종료 상태를 가져갈 때까지 struct thread가 사라지지 않게 기다린다 */
 	if (curr->pml4 != NULL)
@@ -563,6 +591,11 @@ load (const char *file_name, struct intr_frame *if_) {
 		goto done;
 	}
 
+	/* 실행 중인 파일은 수정되지 않도록 쓰기 금지 */
+	lock_acquire(&filesys_lock);
+	file_deny_write(file);
+	lock_release(&filesys_lock);
+
 	/* Read and verify executable header. */
 	lock_acquire(&filesys_lock);
 	off_t read = file_read (file, &ehdr, sizeof ehdr);
@@ -651,12 +684,18 @@ load (const char *file_name, struct intr_frame *if_) {
 	 * TODO: Implement argument passing (see project2/argument_passing.html). */
 
 	success = true;
+	/* 성공하면 파일을 닫지 않고 종료(또는 다음 exec)할 때까지 들고 있는다 */
+	t->running_file = file;
 
 done:
 	/* We arrive here whether the load is successful or not. */
-	lock_acquire(&filesys_lock);
-	file_close (file);
-	lock_release(&filesys_lock);
+	if (!success)
+	{
+		lock_acquire(&filesys_lock);
+		file_close (file);
+		lock_release(&filesys_lock);
+	}
+
 	return success;
 }
 

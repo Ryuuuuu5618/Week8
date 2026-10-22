@@ -97,6 +97,9 @@ struct thread {
     struct semaphore wait_sema;
     struct semaphore free_sema;
 
+    /* 실행 중인 파일 (종료할 때까지 열어 두고 쓰기 금지) */
+    struct file *running_file;
+
 #ifdef USERPROG
     /* Owned by userprog/process.c. */
     uint64_t *pml4;                     /* Page map level 4 */

@@ -16,6 +16,7 @@
 #include "filesys/file.h"
 #include "userprog/process.h"
 #include "threads/palloc.h"
+#include "devices/input.h"
 
 struct lock file_lock;
 
@@ -23,7 +24,7 @@ void syscall_entry (void);
 void syscall_handler (struct intr_frame *);
 
 static bool syscall_invalid_memory (struct intr_frame *);
-static bool valid_user_buffer (const void *buffer, size_t size);
+static bool valid_user_buffer (const void *buffer, size_t size, bool writable);
 static bool valid_user_string (const char *str);
 static void exit_with_status (int status);
 static bool valid_fd (uint64_t fd , struct thread *curr);
@@ -177,19 +178,21 @@ syscall_invalid_memory (struct intr_frame *f) {
 			return !valid_user_string ((const char *) f->R.rdi);
 
 		/* 버퍼와 크기를 받는 시스템 콜 (rsi = 버퍼, rdx = 크기).
-		 * TODO: read는 커널이 버퍼에 쓰므로 쓰기 가능한 페이지인지도 확인해야 한다. */
+		 * read는 커널이 버퍼에 쓰므로 쓰기 가능한 페이지여야 한다. */
 		case SYS_READ:
+			return !valid_user_buffer ((const void *) f->R.rsi, (size_t) f->R.rdx, true);
 		case SYS_WRITE:
-			return !valid_user_buffer ((const void *) f->R.rsi, (size_t) f->R.rdx);
+			return !valid_user_buffer ((const void *) f->R.rsi, (size_t) f->R.rdx, false);
 
 		default:
 			return false;
 	}
 }
 
-/* BUFFER부터 SIZE바이트가 모두 접근 가능한 사용자 메모리인지 확인한다. */
+/* BUFFER부터 SIZE바이트가 모두 접근 가능한 사용자 메모리인지 확인한다.
+ * WRITABLE이면 걸친 모든 페이지가 쓰기 가능한지도 확인한다. */
 static bool
-valid_user_buffer (const void *buffer, size_t size) {
+valid_user_buffer (const void *buffer, size_t size, bool writable) {
 	uintptr_t start = (uintptr_t) buffer;
 	uintptr_t end;
 
@@ -213,6 +216,11 @@ valid_user_buffer (const void *buffer, size_t size) {
 	for (uintptr_t page = (uintptr_t) pg_round_down (buffer); page <= end;
 			page += PGSIZE) {
 		if (pml4_get_page (thread_current ()->pml4, (void *) page) == NULL) {
+			return false;
+		}
+		/* 읽기 전용 페이지(코드 영역 등)에 커널이 대신 쓰지 않도록 막는다 */
+		if (writable
+				&& !is_writable (pml4e_walk (thread_current ()->pml4, page, 0))) {
 			return false;
 		}
 	}
@@ -328,8 +336,13 @@ sys_filesize (int fd) {
 static int
 sys_read (int fd, void *buffer, unsigned size) {
 	struct thread *curr = thread_current();
-	if ((int) fd == 0) {
-		return input_getc();
+	if (fd == 0) {
+		/* 키보드: size바이트를 한 글자씩 버퍼에 채우고 읽은 바이트 수를 반환 */
+		uint8_t *buf = buffer;
+		for (unsigned i = 0; i < size; i++) {
+			buf[i] = input_getc();
+		}
+		return size;
 	}
 	else if (valid_fd(fd, curr)) {
 		int read_size = -1;

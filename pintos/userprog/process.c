@@ -408,9 +408,14 @@ process_exit (void) {
 			}
 		}
 
+		/* 실행 파일 닫기 (쓰기 금지도 풀림). 다른 파일 시스템 호출처럼 락 안에서 */
+		lock_acquire(&file_lock);
 		file_close(curr->exec_file);
+		lock_release(&file_lock);
+		curr->exec_file = NULL;
 
 		palloc_free_page(curr->file_descriptor);
+		curr->file_descriptor = NULL;
 
 		struct list_elem *curr_child_elem = list_begin(&curr->child);
 		while (curr_child_elem != list_end(&curr->child)) {
